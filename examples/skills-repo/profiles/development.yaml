@@ -1,0 +1,9 @@
+name: development
+description: Skills for day-to-day development work
+skills:
+  - python-best-practices
+  - git-conventional-commits
+  - mcp-server-dev
+rules:
+  - code-style
+  - security-review

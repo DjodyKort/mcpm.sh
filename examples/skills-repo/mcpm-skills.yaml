@@ -1,0 +1,5 @@
+name: mcpm-example-skills
+description: Example skills repo demonstrating mcpm skills sync. Useful for MCP server development and Python projects.
+author: mcpm
+version: "1.0.0"
+license: MIT

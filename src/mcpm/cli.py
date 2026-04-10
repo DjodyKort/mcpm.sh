@@ -24,10 +24,12 @@ from mcpm.commands import (
     profile,
     run,
     search,
+    skills,
     uninstall,
     update,
     usage,
 )
+from mcpm.commands.agents import agents
 from mcpm.commands.share import share
 from mcpm.utils.logging_config import setup_logging
 from mcpm.utils.rich_click_config import click, get_header_text
@@ -143,6 +145,8 @@ main.add_command(usage.usage)
 main.add_command(config.config)
 main.add_command(migrate.migrate)
 main.add_command(update.update)
+main.add_command(skills.skills, name="skills")
+main.add_command(agents, name="agents")
 main.add_command(share)
 
 

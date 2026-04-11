@@ -166,7 +166,7 @@ def find_skills_repo(start_path: Optional[Path] = None) -> Optional[Path]:
     for _ in range(20):  # safety limit
         if (current / "mcpm-skills.yaml").exists():
             return current
-        if (current / "skills").is_dir() or (current / "rules").is_dir() or (current / "agents").is_dir():
+        if (current / "skills").is_dir() or (current / "rules").is_dir() or (current / "agents").is_dir() or (current / "styles").is_dir():
             return current
         parent = current.parent
         if parent == current:

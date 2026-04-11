@@ -99,6 +99,7 @@ class SkillsConfigManager:
         (self.project_root / "skills").mkdir(exist_ok=True)
         (self.project_root / "rules").mkdir(exist_ok=True)
         (self.project_root / "agents").mkdir(exist_ok=True)
+        (self.project_root / "styles").mkdir(exist_ok=True)
         (self.project_root / "profiles").mkdir(exist_ok=True)
 
         # Create manifest
@@ -134,6 +135,30 @@ TODO: Add {skill_type} instructions here.
 """
         skill_file.write_text(template, encoding="utf-8")
         return skill_file
+
+    def scaffold_style(self, name: str) -> Path:
+        """Create a new style directory with a template STYLE.md.
+
+        Args:
+            name: Style name (kebab-case).
+
+        Returns:
+            Path to the created STYLE.md.
+        """
+        style_dir = self.project_root / "styles" / name
+        style_dir.mkdir(parents=True, exist_ok=True)
+
+        style_file = style_dir / "STYLE.md"
+        template = f"""---
+name: {name}
+description: "TODO: Describe the tone, verbosity, and persona of this output style."
+keep-coding-instructions: true
+---
+
+TODO: Add style instructions here.
+"""
+        style_file.write_text(template, encoding="utf-8")
+        return style_file
 
     # ---- Drift Detection ----
 

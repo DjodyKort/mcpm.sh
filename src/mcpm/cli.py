@@ -3,6 +3,8 @@ MCPM CLI - Main entry point for the Model Context Protocol Manager CLI
 """
 
 # Import rich-click configuration before anything else
+import os
+from pathlib import Path
 from typing import Any, Dict
 
 from rich.console import Console
@@ -31,10 +33,9 @@ from mcpm.commands import (
 )
 from mcpm.commands.agents import agents
 from mcpm.commands.share import share
+from mcpm.commands.styles import styles as styles_group
 from mcpm.utils.logging_config import setup_logging
 from mcpm.utils.rich_click_config import click, get_header_text
-import os
-from pathlib import Path
 
 console = Console()          # stdout for regular CLI output
 err_console = Console(stderr=True)  # stderr for errors/tracebacks
@@ -147,11 +148,44 @@ main.add_command(migrate.migrate)
 main.add_command(update.update)
 main.add_command(skills.skills, name="skills")
 main.add_command(agents, name="agents")
+main.add_command(styles_group, name="styles")
 main.add_command(share)
 
 
 # Keep these for now but they could be simplified later
 main.add_command(client.client)
+
+
+# ---- Plugin Loading (Entry Points) ----
+
+
+def _load_plugins():
+    """Discover and load Click command groups from installed mcpm plugins.
+
+    Plugins register via entry_points in their pyproject.toml:
+
+        [project.entry-points."mcpm.plugins"]
+        sync = "mcpm_sync.cli:sync_group"
+
+    Installing the plugin (`pip install mcpm-sync`) makes the command
+    available as `mcpm sync` automatically.
+    """
+    import importlib.metadata
+
+    try:
+        eps = importlib.metadata.entry_points()
+        plugin_eps = eps.select(group="mcpm.plugins") if hasattr(eps, "select") else eps.get("mcpm.plugins", [])
+        for ep in plugin_eps:
+            try:
+                main.add_command(ep.load(), name=ep.name)
+            except Exception as e:
+                err_console.print(f"[red]Failed to load plugin '{ep.name}': {e}[/]")
+    except Exception:
+        pass
+
+
+_load_plugins()
+
 
 if __name__ == "__main__":
     main()

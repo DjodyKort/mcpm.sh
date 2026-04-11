@@ -107,6 +107,8 @@ class LockFile(BaseModel):
     skills: Dict[str, LockFileEntry] = {}
     rules: Dict[str, LockFileEntry] = {}
     agents: Dict[str, LockFileEntry] = {}
+    styles: Dict[str, LockFileEntry] = {}
+    active_styles: Dict[str, str] = {}  # client_key -> style_name for Tier 2 tracking
 
     @classmethod
     def create_now(cls) -> "LockFile":

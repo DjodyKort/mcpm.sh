@@ -435,7 +435,7 @@ def test_client_edit_non_interactive_add_server(monkeypatch):
 
     assert result.exit_code == 0
     assert "Successfully updated" in result.output
-    
+
     # Verify that add_server was called with the prefixed server name
     mock_client_manager.add_server.assert_called()
     # Check that add_server was called with a server config for the prefixed server name
@@ -481,7 +481,7 @@ def test_client_edit_non_interactive_remove_server(monkeypatch):
     # The command runs without crashing and removes the server
     assert result.exit_code == 0
     assert "Cursor Configuration Management" in result.output
-    
+
     # Verify that remove_server was called with the prefixed server name
     mock_client_manager.remove_server.assert_called_with("mcpm_existing-server")
 

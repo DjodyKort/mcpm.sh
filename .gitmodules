@@ -1,0 +1,3 @@
+[submodule "plugins/mcpm-sync"]
+	path = plugins/mcpm-sync
+	url = https://github.com/DjodyKort/mcpm-sync.git

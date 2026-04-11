@@ -490,6 +490,17 @@ def install(server_name, force=False, alias=None):
     success = global_add_server(full_server_config.to_server_config(), should_force_operation(force))
 
     if success:
+        # Auto-populate source metadata for update tracking
+        try:
+            from mcpm.core.source import SourcesManager, detect_source
+
+            server_config_obj = full_server_config.to_server_config()
+            install_sources = SourcesManager()
+            source = detect_source(server_config_obj)
+            install_sources.set(config_name, source)
+        except Exception:
+            pass  # Don't fail install if source tracking fails
+
         # Server has been successfully added to the global configuration
         console.print(f"[bold green]Successfully installed {display_name} to global configuration![/]")
 

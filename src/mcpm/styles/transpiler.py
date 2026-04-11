@@ -174,7 +174,7 @@ def sync_styles(
                     if style.name in lockfile.styles:
                         lockfile.styles[style.name].clients_synced.append(client_key)
                         lockfile.styles[style.name].warnings.extend(result.warnings)
-                if not dry_run:
+                if not dry_run and result.content:
                     result.output_path.parent.mkdir(parents=True, exist_ok=True)
                     result.output_path.write_text(result.content, encoding="utf-8")
         except Exception as e:

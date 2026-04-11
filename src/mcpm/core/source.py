@@ -37,9 +37,11 @@ class GitSource(BaseModel):
 class GithubReleaseSource(BaseModel):
     type: Literal["github-release"] = "github-release"
     path: str
-    repo: str
+    repo: str = ""  # "owner/repo" -- empty means needs manual config during --init
     current_version: Optional[str] = None
     asset_pattern: Optional[str] = None
+    binary_name: Optional[str] = None  # Filename of binary inside archive
+    include_prerelease: bool = False
     last_checked: Optional[datetime] = None
     last_updated: Optional[datetime] = None
 
@@ -112,6 +114,38 @@ def _extract_npx_package(args: List[str]) -> Optional[str]:
     return None
 
 
+def _looks_like_release_binary(path: Path) -> bool:
+    """Heuristic: check if a file looks like a standalone binary from a GitHub release.
+
+    Conservative: returns True only for files in known mcpm-managed dirs or common
+    binary locations that aren't scripts or interpreted files.
+    """
+    str_path = str(path).lower()
+    name = path.name.lower()
+
+    # Skip interpreters and scripts
+    if name in ("python", "python3", "node", "ruby", "perl", "bash", "sh"):
+        return False
+    if path.suffix in (".py", ".js", ".ts", ".rb", ".pl", ".sh", ".bat", ".ps1"):
+        return False
+
+    # Check if it's in a known mcpm data directory
+    mcpm_data = str(Path.home() / ".mcpm").lower()
+    if mcpm_data in str_path:
+        return True
+
+    # Check common binary install locations
+    bin_dirs = [
+        str(Path.home() / ".local" / "bin").lower(),
+        str(Path.home() / "bin").lower(),
+    ]
+    for bin_dir in bin_dirs:
+        if str_path.startswith(bin_dir):
+            return True
+
+    return False
+
+
 def detect_source(server_config: ServerConfig) -> SourceMetadata:
     """Auto-detect the source type for a server based on its configuration."""
 
@@ -165,6 +199,10 @@ def detect_source(server_config: ServerConfig) -> SourceMetadata:
                 git_root = _find_git_root(first_arg_path)
                 if git_root:
                     return GitSource(path=str(git_root))
+
+        # Check if this looks like a standalone binary (potential GitHub release)
+        if _looks_like_release_binary(cmd_path):
+            return GithubReleaseSource(path=str(cmd_path))
 
         return UnknownSource(reason=f"absolute path but no git repo found: {command}")
 

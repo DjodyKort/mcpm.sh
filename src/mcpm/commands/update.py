@@ -47,8 +47,9 @@ logger = logging.getLogger(__name__)
 @click.option("--rebase", is_flag=True, help="Use git pull --rebase instead of --ff-only")
 @click.option("--force", is_flag=True, help="Skip confirmation prompts")
 @click.option("--verbose", "-V", is_flag=True, help="Show detailed output")
+@click.option("--include-prerelease", is_flag=True, help="Include pre-release versions for GitHub release servers")
 @click.option("--init", "run_init", is_flag=True, help="Scan installed servers and populate source metadata")
-def update(server_name, check_only, rebase, force, verbose, run_init):
+def update(server_name, check_only, rebase, force, verbose, include_prerelease, run_init):
     """Check for and apply updates to installed MCP servers.
 
     Updates git-based servers by pulling the latest changes from their remote.
@@ -75,6 +76,7 @@ def update(server_name, check_only, rebase, force, verbose, run_init):
         use_rebase=rebase,
         force=force,
         verbose=verbose,
+        include_prerelease=include_prerelease,
     )
 
 
@@ -159,8 +161,48 @@ def _run_init(force: bool = False):
             else:
                 console.print(f"  [cyan]{name}[/]  [dim]remote[/]  {getattr(server_config, 'url', '')}")
 
+        elif isinstance(detected, GithubReleaseSource):
+            console.print(f"  [cyan]{name}[/]  [magenta]release[/]  {detected.path}")
+            if not detected.repo and not is_non_interactive():
+                repo_input = click.prompt(
+                    "    GitHub repo (owner/repo, or 'skip')",
+                    default="skip",
+                    show_default=False,
+                )
+                if repo_input.lower() != "skip" and "/" in repo_input:
+                    detected.repo = repo_input
+                    # Try to detect current version from latest release
+                    try:
+                        from mcpm.utils import github_release as release_utils
+
+                        check = release_utils.check_for_update(repo=detected.repo)
+                        if not check.error:
+                            console.print(f"    [dim]latest release: {check.latest_version}[/]")
+                            version_input = click.prompt(
+                                "    current installed version (or 'latest' if just installed)",
+                                default="latest",
+                                show_default=False,
+                            )
+                            if version_input.lower() == "latest":
+                                detected.current_version = check.latest_version
+                            else:
+                                detected.current_version = version_input
+                    except Exception:
+                        pass
+
         elif isinstance(detected, UnknownSource):
             console.print(f"  [cyan]{name}[/]  [yellow]unknown[/]  {detected.reason}")
+            # Offer manual GitHub release tagging
+            if not is_non_interactive():
+                repo_input = click.prompt(
+                    "    Is this a GitHub release? Enter repo (owner/repo) or 'skip'",
+                    default="skip",
+                    show_default=False,
+                )
+                if repo_input.lower() != "skip" and "/" in repo_input:
+                    cmd = getattr(server_config, "command", "")
+                    detected = GithubReleaseSource(path=cmd, repo=repo_input)
+                    console.print(f"    [green]Tagged as GitHub release: {repo_input}[/]")
 
         else:
             console.print(f"  [cyan]{name}[/]  [dim]{detected.type}[/]")
@@ -209,6 +251,7 @@ def _run_update(
     use_rebase: bool = False,
     force: bool = False,
     verbose: bool = False,
+    include_prerelease: bool = False,
 ):
     """Main update logic — check and optionally apply updates."""
     global_config = GlobalConfigManager()
@@ -253,7 +296,14 @@ def _run_update(
             continue
 
         if isinstance(source, GithubReleaseSource):
-            console.print(f"  [cyan]{name:<22}[/] [dim]release[/] skipped (v2)")
+            if not source.repo:
+                console.print(f"  [cyan]{name:<22}[/] [yellow]release[/] no repo configured — run [bold]mcpm update --init[/]")
+                continue
+            checked = _check_release_server(name, source, sources, updatable, verbose, include_prerelease)
+            if checked:
+                git_checked += 1
+            else:
+                git_skipped += 1
             continue
 
         if isinstance(source, UnknownSource):
@@ -294,35 +344,54 @@ def _run_update(
 
     # Apply updates
     success_count = 0
-    for name, source, status in updatable:
+    for name, source, status_or_check in updatable:
         console.print(f"[bold]Updating {name}...[/]")
-        repo_path = Path(source.path)
 
-        # Pull
-        if use_rebase:
-            result = git_utils.pull_rebase(repo_path)
-        else:
-            result = git_utils.pull_ff_only(repo_path)
+        if isinstance(source, GitSource):
+            repo_path = Path(source.path)
 
-        if not result.success:
-            console.print(f"  git pull [red]✗[/] {result.error}")
-            if not use_rebase and "cannot fast-forward" in (result.error or ""):
-                console.print(f"  [dim]Run manually: cd {source.path} && git pull --rebase[/]")
-            console.print()
-            continue
+            # Pull
+            if use_rebase:
+                result = git_utils.pull_rebase(repo_path)
+            else:
+                result = git_utils.pull_ff_only(repo_path)
 
-        console.print(f"  git pull [green]✓[/] ({status.commits_behind} new commit{'s' if status.commits_behind != 1 else ''})")
+            if not result.success:
+                console.print(f"  git pull [red]✗[/] {result.error}")
+                if not use_rebase and "cannot fast-forward" in (result.error or ""):
+                    console.print(f"  [dim]Run manually: cd {source.path} && git pull --rebase[/]")
+                console.print()
+                continue
 
-        # Post-update command
-        post_ok = True
-        if source.post_update:
-            post_ok = _run_post_update(source.post_update, repo_path)
-            if not post_ok:
-                console.print(f"  [dim]Run manually: cd {source.path} && {source.post_update}[/]")
+            console.print(f"  git pull [green]✓[/] ({status_or_check.commits_behind} new commit{'s' if status_or_check.commits_behind != 1 else ''})")
 
-        if post_ok:
-            sources.mark_updated(name)
-            success_count += 1
+            # Post-update command
+            post_ok = True
+            if source.post_update:
+                post_ok = _run_post_update(source.post_update, repo_path)
+                if not post_ok:
+                    console.print(f"  [dim]Run manually: cd {source.path} && {source.post_update}[/]")
+
+            if post_ok:
+                sources.mark_updated(name)
+                success_count += 1
+
+        elif isinstance(source, GithubReleaseSource):
+            from mcpm.utils import github_release as release_utils
+
+            check_result = status_or_check  # This is a ReleaseCheckResult
+            console.print(f"  downloading {check_result.asset_name}...")
+
+            result = release_utils.apply_update(source.path, source.repo, check_result)
+
+            if result.success:
+                source.current_version = result.new_version
+                sources.set(name, source)
+                sources.mark_updated(name)
+                success_count += 1
+                console.print(f"  [green]✓[/] {result.message}")
+            else:
+                console.print(f"  [red]✗[/] {result.error}")
 
         console.print()
 
@@ -372,6 +441,43 @@ def _check_git_server(name, source, sources, updatable, verbose) -> bool:
             console.print(f"    [dim]{summary}[/]")
 
     updatable.append((name, source, status))
+    return True
+
+
+def _check_release_server(name, source, sources, updatable, verbose, include_prerelease) -> bool:
+    """Check a single GitHub release server for updates. Returns True if successfully checked."""
+    from mcpm.utils import github_release as release_utils
+
+    use_prerelease = include_prerelease or source.include_prerelease
+
+    check = release_utils.check_for_update(
+        repo=source.repo,
+        current_version=source.current_version,
+        asset_pattern=source.asset_pattern,
+        include_prerelease=use_prerelease,
+    )
+
+    if check.error:
+        console.print(f"  [cyan]{name:<22}[/] [red]release[/] {check.error}")
+        return False
+
+    sources.mark_checked(name)
+
+    if not check.has_update:
+        version_str = source.current_version or check.latest_version
+        console.print(f"  [cyan]{name:<22}[/] [green]release[/] up to date ({version_str})")
+        return True
+
+    version_display = f"{source.current_version or '?'} -> {check.latest_version}"
+    console.print(f"  [cyan]{name:<22}[/] [yellow]release[/] [bold]{version_display}[/]")
+
+    if verbose and check.asset_name:
+        size_mb = check.asset_size / (1024 * 1024) if check.asset_size else 0
+        console.print(f"    [dim]asset: {check.asset_name} ({size_mb:.1f} MB)[/]")
+        if check.checksum_url:
+            console.print("    [dim]checksum: available[/]")
+
+    updatable.append((name, source, check))
     return True
 
 

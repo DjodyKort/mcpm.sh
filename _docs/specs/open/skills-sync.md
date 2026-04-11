@@ -4,8 +4,8 @@
 |-------|--------|
 | Analysis | Done |
 | Specification | Done |
-| Implementation | Done (Phase 1-3) |
-| Tests | Done (183 tests) |
+| Implementation | Done (Phase 1-3 + Output Styles) |
+| Tests | Done (183 skills/agents tests + 58 styles tests) |
 | Documentation | Done |
 
 ## Summary
@@ -668,7 +668,7 @@ This allows MCP-connected agents to discover and read skills programmatically. D
 
 ## 9. Implementation Status
 
-All three phases are implemented. 183 tests, 62 source files, 19 CLI commands, 15 client transpilers + AGENTS.md.
+All three phases + output styles are implemented. 241 tests, 89 source files, 26 CLI commands, 15 skills transpilers + 6 agent transpilers + 15 style transpilers + AGENTS.md.
 
 ### Phase 1: Local skills + sync -- DONE
 
@@ -699,6 +699,24 @@ All three phases are implemented. 183 tests, 62 source files, 19 CLI commands, 1
 19. ~~Registry schema~~ `src/mcpm/skills/registry.py` (schema defined, actual registry server deferred)
 20. ~~Router resource exposure~~ `src/mcpm/skills/router.py` (registers `mcpm://skills/*` resources)
 21. ~~Usage analytics~~ `src/mcpm/skills/analytics.py` (tracks sync/install/uninstall via SQLite monitor)
+
+### Phase 4: Output Styles -- DONE
+
+Output styles are a fourth syncable entity controlling HOW the AI responds (tone, verbosity, persona). Unlike skills/rules/agents, styles are mutually exclusive -- only one active at a time.
+
+**Two-tier architecture:**
+- **Tier 1 (native toggle):** Claude Code (`.claude/output-styles/`) and Roo Code (`.roomodes` with `style-` prefix). `mcpm styles sync` writes all styles; user toggles in client UI.
+- **Tier 2 (apply/remove):** All other 13 clients. `mcpm styles apply <name>` injects one style as an always-on rule at a fixed `mcpm-output-style` path. `mcpm styles remove` deletes it.
+
+22. ~~Style schema + parser~~ `src/mcpm/styles/schema.py`, `src/mcpm/styles/parser.py`
+23. ~~Style transpiler base + registry~~ `src/mcpm/styles/transpiler.py` (sync_styles, apply_style, remove_style)
+24. ~~Tier 1 transpilers~~ `src/mcpm/styles/transpilers/claude_code.py`, `roo_code.py`
+25. ~~Tier 2 transpilers (13)~~ cursor, windsurf, vscode_copilot, gemini_cli, codex_cli, continue_dev, jetbrains, cline, zed, amazon_q, aider, trae, goose
+26. ~~CLI commands (7)~~ `src/mcpm/commands/styles/` (add, sync, apply, remove, ls, status, clean)
+27. ~~LockFile extension~~ `styles` + `active_styles` fields added to lockfile schema
+28. ~~Roo Code .roomodes merge~~ styles coexist with agent modes via `style-` slug prefix
+29. ~~Zed .rules coexistence~~ separate `<!-- mcpm-style:start/end -->` delimiters
+30. ~~58 tests~~ `tests/test_styles/` (schema, parser, transpilers, sync/apply/remove, edge cases)
 
 ---
 

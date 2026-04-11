@@ -135,8 +135,21 @@ def get_transpiler(client_key: str) -> Optional[BaseSkillTranspiler]:
     return cls() if cls else None
 
 
+_transpilers_loaded = False
+
+
+def _ensure_transpilers_loaded():
+    """Lazily import all transpiler modules to trigger registration."""
+    global _transpilers_loaded
+    if not _transpilers_loaded:
+        import mcpm.skills.transpilers  # noqa: F401
+
+        _transpilers_loaded = True
+
+
 def get_all_transpilers() -> Dict[str, BaseSkillTranspiler]:
     """Get instances of all registered transpilers."""
+    _ensure_transpilers_loaded()
     return {key: cls() for key, cls in _TRANSPILER_REGISTRY.items()}
 
 
@@ -209,11 +222,17 @@ def sync_skills(
             for skill in skills:
                 entry_key = skill.name
                 target = lockfile.rules if skill.skill_type == "rule" else lockfile.skills
-                if entry_key in target:
-                    target[entry_key].clients_synced.append(client_key)
-                    target[entry_key].warnings.extend(result.warnings)
+                if entry_key not in target:
+                    # Create entry if it wasn't created by per-file transpilers
+                    target[entry_key] = LockFileEntry(
+                        source="local",
+                        version=skill.frontmatter.metadata.get("version"),
+                        hash=compute_skill_hash(skill),
+                    )
+                target[entry_key].clients_synced.append(client_key)
+                target[entry_key].warnings.extend(result.warnings)
 
-            if not dry_run:
+            if not dry_run and result.content:
                 result.output_path.parent.mkdir(parents=True, exist_ok=True)
                 result.output_path.write_text(result.content, encoding="utf-8")
         except Exception as e:

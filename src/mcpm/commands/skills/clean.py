@@ -44,10 +44,17 @@ def clean_skills(client, path):
 
     total_removed = 0
     for client_key, transpiler in transpilers.items():
-        removed = transpiler.clean(project_root, managed_skills=managed_names)
-        for p in removed:
-            console.print(f"  [red]Removed[/] {p.relative_to(project_root)}")
-        total_removed += len(removed)
+        try:
+            removed = transpiler.clean(project_root, managed_skills=managed_names)
+            for p in removed:
+                try:
+                    display = p.relative_to(project_root)
+                except ValueError:
+                    display = p  # Global path (e.g., Claude Desktop skills dir)
+                console.print(f"  [red]Removed[/] {display}")
+            total_removed += len(removed)
+        except Exception as e:
+            console.print(f"  [dim]Skipped {client_key}: {e}[/]")
 
     # Remove lockfile
     if not client and config_manager.lockfile_path.exists():

@@ -45,8 +45,12 @@ MCPM v2.0 provides a simplified approach to managing MCP servers with a global c
 - 🔍 **Server Discovery**: Browse and install from the MCP Registry
 - 🚀 **Direct Execution**: Run servers over stdio or HTTP for testing
 - 🌐 **Public Sharing**: Share servers through secure tunnels
-- 🔄 **Server Updates**: Check for and apply updates to git-based, NPX, and binary servers
+- 🔄 **Server Updates**: Check for and apply updates to git-based, NPX, GitHub release, and binary servers
 - 🎛️ **Client Integration**: Manage configurations for Claude Desktop, Cursor, Windsurf, and more
+- 📝 **Skills Sync**: Author AI coding instructions once, transpile to 15+ client formats
+- 🤖 **Agents Sync**: Define reusable AI personas with model, tools, and permissions -- sync to 6 clients
+- 🎨 **Output Styles**: Control how AI responds (tone, verbosity, persona) -- toggleable across clients
+- 🔌 **Plugin Architecture**: Extend mcpm with external packages via Python entry points
 - 🤖 **AI Agent Friendly**: Non-interactive CLI with comprehensive automation support and [llm.txt](llm.txt) guide
 - 💻 **Beautiful CLI**: Rich formatting and interactive interfaces
 - 📊 **Usage Analytics**: Monitor server usage and performance
@@ -55,18 +59,28 @@ MCPM v2.0 eliminates the complexity of v1's target-based system in favor of a cl
 
 ## 🖥️ Supported MCP Clients
 
-MCPM will support managing MCP servers for the following clients:
+MCPM supports managing MCP servers, skills, agents, and styles for the following clients:
 
-- 🤖 Claude Desktop (Anthropic)
-- ⌨️ Cursor
-- 🏄 Windsurf
-- 🧩 Vscode
-- 📝 Cline
-- ➡️ Continue
-- 🦢 Goose
-- 🔥 5ire
-- 🦘 Roo Code
-- ✨ More clients coming soon...
+| Client | MCP Servers | Skills | Agents | Styles |
+|--------|:-----------:|:------:|:------:|:------:|
+| Claude Desktop | Yes | -- | -- | -- |
+| Claude Code | Yes | Yes | Yes | Yes (native toggle) |
+| Cursor | Yes | Yes | Yes | Yes |
+| Windsurf | Yes | Yes | -- | Yes |
+| VS Code Copilot | Yes | Yes | Yes | Yes |
+| Gemini CLI | Yes | Yes | Yes | Yes |
+| Codex CLI | Yes | Yes | Yes | Yes |
+| Roo Code | Yes | Yes | Yes | Yes (native toggle) |
+| Cline | Yes | Yes | -- | Yes |
+| Continue | Yes | Yes | -- | Yes |
+| JetBrains AI | -- | Yes | -- | Yes |
+| Goose | Yes | Yes | -- | Yes |
+| Trae | Yes | Yes | -- | Yes |
+| 5ire | Yes | -- | -- | -- |
+| Qwen CLI | Yes | -- | -- | -- |
+| Zed | -- | Yes | -- | Yes |
+| Amazon Q | -- | Yes | -- | Yes |
+| Aider | -- | Yes | -- | Yes |
 
 ## 🔥 Command Line Interface (CLI)
 
@@ -135,20 +149,61 @@ mcpm client edit CLIENT_NAME -e # Open client config in external editor
 mcpm client import CLIENT_NAME  # Import server configurations from a client
 ```
 
+### 📝 Skills & Rules
+
+Author AI coding instructions once, transpile to every client's native format. Skills use progressive disclosure (loaded on demand), rules are always-on.
+
+```bash
+mcpm skills init                  # Initialize a skills repository
+mcpm skills add code-review       # Create a new skill from template
+mcpm skills add commit-style --type rule  # Create an always-on rule
+mcpm skills sync                  # Transpile to all 15+ installed clients
+mcpm skills sync --client cursor  # Sync to a specific client only
+mcpm skills ls                    # List all skills and rules
+mcpm skills diff                  # Show changes since last sync
+mcpm skills lint                  # Validate format and best practices
+mcpm skills status                # Check sync drift per client
+```
+
+### 🤖 Agents
+
+Define reusable AI personas with model, tools, permissions, and system prompts. Sync to Claude Code, Cursor, Codex CLI, Gemini CLI, VS Code Copilot, and Roo Code.
+
+```bash
+mcpm agents add reviewer          # Create a new agent
+mcpm agents sync                  # Transpile to all supported clients
+mcpm agents ls                    # List available agents
+mcpm agents lint                  # Validate agent definitions
+```
+
+### 🎨 Output Styles
+
+Control how the AI responds -- tone, verbosity, persona. Unlike skills/rules, styles are toggleable and mutually exclusive (one active at a time).
+
+```bash
+mcpm styles add concise-engineer  # Create a new output style
+mcpm styles sync                  # Push to native toggle clients (Claude Code, Roo Code)
+mcpm styles apply concise-engineer  # Inject into other clients as always-on rule
+mcpm styles remove                # Remove active style from non-native clients
+mcpm styles ls                    # List styles + active status per client
+mcpm styles status                # Per-client breakdown
+```
+
 ### 🔄 Server Updates
 
 Check for and apply updates to installed MCP servers:
 
 ```bash
-mcpm update                   # Update all servers
-mcpm update SERVER_NAME       # Update a specific server
-mcpm update --check           # Dry run — check for updates without applying
-mcpm update --rebase          # Use git rebase instead of fast-forward
-mcpm update --init            # Scan servers and populate source metadata
-mcpm update --init --force    # Re-detect all source metadata
+mcpm update                       # Update all servers
+mcpm update SERVER_NAME           # Update a specific server
+mcpm update --check               # Dry run — check for updates without applying
+mcpm update --rebase              # Use git rebase instead of fast-forward
+mcpm update --include-prerelease  # Include pre-release versions for GitHub releases
+mcpm update --init                # Scan servers and populate source metadata
+mcpm update --init --force        # Re-detect all source metadata
 ```
 
-MCPM tracks where each server came from (git repo, npm package, HTTP remote) and can pull the latest changes automatically. Git-based servers are updated via `git pull --ff-only` by default, with `--rebase` as an opt-in alternative. NPX/UVX servers auto-update at runtime and are shown for informational purposes.
+MCPM tracks where each server came from (git repo, npm package, GitHub release, HTTP remote) and can pull the latest changes automatically. Git-based servers are updated via `git pull --ff-only` by default, with `--rebase` as an opt-in alternative. **GitHub release servers** are updated by downloading the matching platform binary, verifying checksums, and atomically replacing the binary with rollback safety. NPX/UVX servers auto-update at runtime and are shown for informational purposes.
 
 ### 🛠️ System & Configuration
 
@@ -284,14 +339,21 @@ mcpm client edit cursor --add-profile web-dev --force
 - [x] Import from existing client configurations
 - [x] Additional client support (gemini-cli, codex, etc.)
 
-### 🔮 Future Enhancements
+### ✅ v2.x Complete
 - [x] Server update management (`mcpm update`)
-- [ ] GitHub release binary updates (download + replace)
+- [x] GitHub release binary updates with checksum verification and atomic install
+- [x] Skills sync system (15+ client transpilers)
+- [x] Agents sync system (6 client transpilers)
+- [x] Output styles sync system (15 client transpilers, two-tier architecture)
+- [x] Plugin architecture for external extensions
+
+### 🔮 Future Enhancements
 - [ ] Advanced Server access monitoring and analytics
 - [ ] Execution in docker
 - [ ] Expose MCPM functionality as an MCP server (search, install, profile management etc.)
 - [ ] TUI interface for MCP inspect
 - [ ] TUI interface for MCP & profile management
+- [ ] Central skills registry (publish and discover community skills)
 
 
 ## 📦 Other Installation Methods
@@ -349,15 +411,19 @@ The project follows the modern src-based layout:
 
 ```
 mcpm.sh/
-├── src/             # Source package directory
-│   └── mcpm/        # Main package code
-├── tests/           # Test directory
-├── test_cli.py      # Development CLI runner
-├── pyproject.toml   # Project configuration
-├── pages/           # Website content
-│   └── registry/    # Registry website
-├── mcp-registry/    # MCP Registry data
-└── README.md        # Documentation
+├── src/mcpm/            # Main package code
+│   ├── commands/        # CLI commands (install, update, skills, agents, styles, etc.)
+│   ├── core/            # Server schemas, source tracking
+│   ├── clients/         # Client managers (14 MCP clients)
+│   ├── skills/          # Skills sync engine (parser, transpilers, lint, config)
+│   ├── styles/          # Output styles sync engine (parser, transpilers, lint)
+│   └── utils/           # Git, platform, GitHub release utilities
+├── tests/               # Test directory (600+ tests)
+├── examples/            # Example skills, rules, agents, styles
+├── plugins/             # Plugin submodules (e.g., mcpm-sync)
+├── mcp-registry/        # MCP Registry data
+├── pages/               # Website content
+└── pyproject.toml       # Project configuration
 ```
 
 ### 🚀 Development Setup

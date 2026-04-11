@@ -181,24 +181,26 @@ mcpm skills sync
 
 After `mcpm skills sync`, here's where files land per client:
 
-| Client | Skills | Rules | Agents |
-|--------|--------|-------|--------|
-| Claude Code | `.claude/skills/<name>/SKILL.md` | `.claude/rules/<name>.md` | `.claude/agents/<name>.md` |
-| Cursor | `.cursor/rules/<name>/RULE.md` | `.cursor/rules/<name>/RULE.md` | `.cursor/agents/<name>.md` |
-| Windsurf | `.windsurf/rules/<name>.md` | `.windsurf/rules/<name>.md` | -- |
-| VS Code Copilot | `.github/skills/<name>/SKILL.md` | `.github/instructions/<name>.instructions.md` | `.github/agents/<name>.agent.md` |
-| Continue.dev | `.continue/rules/<name>.md` | `.continue/rules/<name>.md` | -- |
-| JetBrains AI | `.aiassistant/rules/<name>.md` | `.aiassistant/rules/<name>.md` | -- |
-| Cline | `.clinerules/<name>.md` | `.clinerules/<name>.md` | -- |
-| Zed | `.rules` (all concatenated) | `.rules` (appended) | -- |
-| Gemini CLI | `.gemini/skills/<name>/SKILL.md` | `.gemini/skills/<name>/SKILL.md` | `.gemini/agents/<name>.md` |
-| Codex CLI | `.agents/skills/<name>/SKILL.md` | `AGENTS.md` (appended) | `.codex/agents/<name>.toml` |
-| Amazon Q | `.amazonq/rules/<name>.md` | `.amazonq/rules/<name>.md` | -- |
-| Aider | `.mcpm/skills/<name>/SKILL.md` | `.mcpm/skills/<name>/SKILL.md` | -- |
-| Trae | `.trae/rules/<name>.md` | `.trae/rules/<name>.md` | -- |
-| Goose | `.goose/skills/<name>/SKILL.md` | `.goose/rules/<name>.md` | -- |
-| Roo Code | `.roo/rules/<name>.md` | `.roo/rules/<name>.md` | `.roomodes` (JSON) |
-| AGENTS.md | `<available_skills>` block | `<available_skills>` block | -- |
+| Client | Skills | Rules | Agents | Styles |
+|--------|--------|-------|--------|--------|
+| Claude Code | `.claude/skills/<name>/SKILL.md` | `.claude/rules/<name>.md` | `.claude/agents/<name>.md` | `.claude/output-styles/<name>.md` (Tier 1) |
+| Cursor | `.cursor/rules/<name>/RULE.md` | `.cursor/rules/<name>/RULE.md` | `.cursor/agents/<name>.md` | `.cursor/rules/mcpm-output-style/RULE.md` (Tier 2) |
+| Windsurf | `.windsurf/rules/<name>.md` | `.windsurf/rules/<name>.md` | -- | `.windsurf/rules/mcpm-output-style.md` (Tier 2) |
+| VS Code Copilot | `.github/skills/<name>/SKILL.md` | `.github/instructions/<name>.instructions.md` | `.github/agents/<name>.agent.md` | `.github/instructions/mcpm-output-style.instructions.md` (Tier 2) |
+| Continue.dev | `.continue/rules/<name>.md` | `.continue/rules/<name>.md` | -- | `.continue/rules/mcpm-output-style.md` (Tier 2) |
+| JetBrains AI | `.aiassistant/rules/<name>.md` | `.aiassistant/rules/<name>.md` | -- | `.aiassistant/rules/mcpm-output-style.md` (Tier 2) |
+| Cline | `.clinerules/<name>.md` | `.clinerules/<name>.md` | -- | `.clinerules/mcpm-output-style.md` (Tier 2) |
+| Zed | `.rules` (all concatenated) | `.rules` (appended) | -- | `.rules` (managed block, Tier 2) |
+| Gemini CLI | `.gemini/skills/<name>/SKILL.md` | `.gemini/skills/<name>/SKILL.md` | `.gemini/agents/<name>.md` | `.gemini/skills/mcpm-output-style/SKILL.md` (Tier 2) |
+| Codex CLI | `.agents/skills/<name>/SKILL.md` | `AGENTS.md` (appended) | `.codex/agents/<name>.toml` | `.agents/skills/mcpm-output-style/SKILL.md` (Tier 2) |
+| Amazon Q | `.amazonq/rules/<name>.md` | `.amazonq/rules/<name>.md` | -- | `.amazonq/rules/mcpm-output-style.md` (Tier 2) |
+| Aider | `.mcpm/skills/<name>/SKILL.md` | `.mcpm/skills/<name>/SKILL.md` | -- | `.mcpm/skills/mcpm-output-style/SKILL.md` (Tier 2) |
+| Trae | `.trae/rules/<name>.md` | `.trae/rules/<name>.md` | -- | `.trae/rules/mcpm-output-style.md` (Tier 2) |
+| Goose | `.goose/skills/<name>/SKILL.md` | `.goose/rules/<name>.md` | -- | `.goose/rules/mcpm-output-style.md` (Tier 2) |
+| Roo Code | `.roo/rules/<name>.md` | `.roo/rules/<name>.md` | `.roomodes` (JSON) | `.roomodes` with `style-` prefix (Tier 1) |
+| AGENTS.md | `<available_skills>` block | `<available_skills>` block | -- | -- |
+
+**Styles Tiers:** Tier 1 clients (Claude Code, Roo Code) get all styles synced -- user toggles in the client UI. Tier 2 clients get one style at a time via `mcpm styles apply`.
 
 ## Activation Modes Explained
 
@@ -211,6 +213,56 @@ After `mcpm skills sync`, here's where files land per client:
 
 Not all clients support all modes. When a mode isn't supported, mcpm **downgrades toward more visible** (manual -> agent -> auto -> always) so the skill never silently disappears. Warnings are shown during sync.
 
+## Output Styles
+
+Output styles control HOW the AI responds -- tone, verbosity, persona. Unlike skills and rules, styles are **toggleable and mutually exclusive** (only one active at a time).
+
+### Add a style
+
+```bash
+mcpm styles add concise-engineer
+```
+
+Edit `styles/concise-engineer/STYLE.md`:
+
+```markdown
+---
+name: concise-engineer
+description: "Terse, bullet-point responses. No filler."
+keep-coding-instructions: true
+---
+
+- Answer in bullet points
+- Skip preamble and summaries
+- Code over prose
+```
+
+### Sync to native clients (Tier 1)
+
+```bash
+mcpm styles sync      # writes all styles to Claude Code + Roo Code
+```
+
+These clients have built-in style toggling -- the user picks one in the client UI.
+
+### Apply to other clients (Tier 2)
+
+```bash
+mcpm styles apply concise-engineer    # injects into Cursor, Windsurf, etc.
+mcpm styles apply teaching-mode       # replaces previous style
+mcpm styles remove                    # deactivates on all Tier 2 clients
+```
+
+Only one style active per client. Applying a new one replaces the old.
+
+### Check status
+
+```bash
+mcpm styles ls        # list available styles
+mcpm styles status    # show active style per client
+mcpm styles clean     # remove all style files from clients
+```
+
 ## Gitignore
 
 Add this to your project's `.gitignore` if you don't want generated files in version control:
@@ -220,6 +272,7 @@ Add this to your project's `.gitignore` if you don't want generated files in ver
 .claude/skills/
 .claude/rules/
 .claude/agents/
+.claude/output-styles/
 .cursor/rules/
 .cursor/agents/
 .windsurf/rules/
@@ -253,3 +306,4 @@ Or keep them checked in so teammates who don't have mcpm still get the rules. Yo
 - **Start with rules**: always-on rules (coding standards, commit conventions) are the simplest and most universally supported
 - **Skills for scoped instructions**: use `globs` to make skills activate only for relevant files
 - **Agents for personas**: agents bundle model + tools + skills + system prompt into a reusable package
+- **Styles for tone**: output styles change how the AI responds without changing what it knows. Native toggle on Claude Code and Roo Code, apply/remove for everyone else

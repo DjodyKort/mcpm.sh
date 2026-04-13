@@ -7,6 +7,7 @@ Install mcpm from this fork with skills, agents, styles, and sync support.
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 - Git
+- SSH key configured for GitHub
 
 ## macOS / Linux
 
@@ -20,7 +21,7 @@ git submodule update --init --recursive
 # Install mcpm (editable — changes take effect immediately)
 uv tool install --force --editable .
 
-# Install sync plugin
+# Install sync plugin into mcpm's environment
 uv pip install --python "$(uv tool dir)/mcpm/bin/python" -e plugins/mcpm-sync
 
 # Verify
@@ -41,10 +42,8 @@ git submodule update --init --recursive
 # Install mcpm (editable)
 uv tool install --force --editable .
 
-# Find the mcpm Python path (which doesn't exist on Windows)
+# Install sync plugin into mcpm's environment
 $mcpmPython = Join-Path (uv tool dir) "mcpm\Scripts\python.exe"
-
-# Install sync plugin
 uv pip install --python $mcpmPython -e plugins/mcpm-sync
 
 # Verify
@@ -53,20 +52,76 @@ mcpm skills ls
 mcpm sync --help
 ```
 
-## Pull configs and skills on a new machine
+## New machine setup
+
+After installing mcpm + sync plugin, run these steps to pull everything down.
+
+### 1. Initialize sync
 
 ```bash
-# Configure skills repo sync
-mcpm sync git-sync --repo git@github.com:DjodyKort/ai-skills.git --auto
-
-# Pull MCP server configs + skills from sync repo
-mcpm sync pull
-
-# Servers are auto-resolved:
-# - git repos: cloned + setup command run
-# - github-release binaries: downloaded
-# - npx/remote: ready immediately
+mcpm sync init --backend git --repo git@github.com:DjodyKort/mcpm-sync-data.git
 ```
+
+You will be prompted for a passphrase. Use the **same passphrase** as the machine that pushed — it derives the decryption key.
+
+### 2. Pull configs + resolve servers
+
+```bash
+mcpm sync pull
+```
+
+This decrypts and restores:
+
+| What                   | Detail                                                |
+|------------------------|-------------------------------------------------------|
+| `servers.json`         | 13 MCP server configs (commands, args, env vars / API keys) |
+| `sources.json`         | Origin metadata per server (git URL, setup command, etc.)   |
+| `server_origins.json`  | Auto-detected install info for the resolver                 |
+| `skills_repo/`         | 5 skills, 1 profile, manifest                               |
+
+And auto-resolves servers:
+
+| Type             | Servers                                                        | Action                                                    |
+|------------------|----------------------------------------------------------------|-----------------------------------------------------------|
+| git              | codeforward-odoo, codeforward-typst, moodle-mcp, scihub, google-docs-mcp | Clone + run setup (`uv sync` / `npm install && npm run build`) |
+| github-release   | anna-mcp                                                       | Download binary                                           |
+| npx              | context7, playwright, drawio, stitch                           | Ready (npx fetches on first run)                          |
+| remote           | figma, balsamiq, clickup                                       | Ready (HTTP endpoints)                                    |
+
+### 3. Transpile skills to clients
+
+```bash
+mcpm skills sync
+```
+
+Writes skills from `~/.config/mcpm/skills_repo/skills/` to each client's native format (e.g. `~/.claude/skills/`).
+
+### 4. Deploy servers to clients
+
+```bash
+mcpm client edit claude-desktop
+mcpm client edit claude-code
+```
+
+Interactive selection — enable the servers you want per client. This writes `mcpm_*` entries (using `mcpm run <name>`) to each client's config.
+
+### 5. Optional: git-sync for direct skill editing
+
+```bash
+mcpm sync git-sync --repo git@github.com:DjodyKort/ai-skills.git --auto
+```
+
+With `--auto`, every `mcpm sync push/pull` also pulls the latest skills from this git repo. Useful for editing skills directly via git instead of only through the encrypted sync bundle.
+
+## What is NOT covered by mcpm sync
+
+| What                                      | Where              | How to get it                                                                     |
+|-------------------------------------------|--------------------|-----------------------------------------------------------------------------------|
+| Claude commands (`~/.claude/commands/`)   | cf-dev-tools       | `source ~/.claude/shell-wrapper.sh` triggers auto-sync                            |
+| Global `CLAUDE.md`                        | cf-dev-tools       | Same as above                                                                     |
+| `settings.json` / `settings.local.json`  | Claude Code config | cf-dev-tools syncs `settings.json`; `settings.local.json` is machine-specific     |
+| Cloud MCPs (Gmail, Slack, Calendar, etc.) | claude.ai managed  | Re-authorize in Claude settings                                                   |
+| Agents & styles                           | Not yet created    | `mcpm agents add` / `mcpm styles add` when needed                                |
 
 ## Update
 
@@ -79,3 +134,17 @@ git submodule update --recursive
 ```
 
 No reinstall needed — changes are live immediately.
+
+## Daily workflow
+
+```bash
+# After changing server configs or skills locally
+mcpm sync push
+
+# On another machine
+mcpm sync pull
+mcpm skills sync    # if skills changed
+
+# Check what would change before pulling
+mcpm sync diff
+```

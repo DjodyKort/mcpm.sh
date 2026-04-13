@@ -119,23 +119,56 @@ def fetch(repo_path: Path, remote: str = "origin") -> GitResult:
         return GitResult(success=False, error="git not found on PATH")
 
 
-def check_status(repo_path: Path, branch: Optional[str] = None, remote: str = "origin") -> GitStatus:
-    """Check how many commits behind we are from the remote."""
-    if not branch:
-        branch = get_default_branch(repo_path, remote) or "main"
+def _get_upstream_ref(repo_path: Path) -> Optional[str]:
+    """Get the current branch's upstream tracking ref (e.g. 'origin/my-branch')."""
+    try:
+        result = _run_git(
+            repo_path,
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
 
-    status = GitStatus(current_branch=branch, remote_branch=f"{remote}/{branch}")
+
+def check_status(repo_path: Path, branch: Optional[str] = None, remote: str = "origin") -> GitStatus:
+    """Check how many commits behind we are from the remote.
+
+    Compares HEAD against the current branch's upstream tracking ref.
+    Falls back to ``origin/{branch}`` when no upstream is configured.
+    """
+    # Prefer the current branch's upstream tracking ref so that repos
+    # checked out on a non-default branch compare against the right remote.
+    upstream = _get_upstream_ref(repo_path)
+    if upstream:
+        remote_ref = upstream
+    else:
+        if not branch:
+            branch = get_default_branch(repo_path, remote) or "main"
+        remote_ref = f"{remote}/{branch}"
+
+    # Determine current local branch name for display
+    try:
+        result = _run_git(repo_path, ["branch", "--show-current"], timeout=5)
+        current_branch = result.stdout.strip() if result.returncode == 0 else branch or "unknown"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        current_branch = branch or "unknown"
+
+    status = GitStatus(current_branch=current_branch, remote_branch=remote_ref)
 
     # Check dirty
     status.is_dirty = is_dirty(repo_path)
 
     # Count commits behind
     try:
-        result = _run_git(repo_path, ["rev-list", "--count", f"HEAD..{remote}/{branch}"], timeout=5)
+        result = _run_git(repo_path, ["rev-list", "--count", f"HEAD..{remote_ref}"], timeout=5)
         if result.returncode == 0:
             status.commits_behind = int(result.stdout.strip())
         else:
-            status.error = f"Could not compare with {remote}/{branch}: {result.stderr.strip()}"
+            status.error = f"Could not compare with {remote_ref}: {result.stderr.strip()}"
             return status
     except (subprocess.TimeoutExpired, FileNotFoundError, ValueError) as e:
         status.error = str(e)
@@ -147,7 +180,7 @@ def check_status(repo_path: Path, branch: Optional[str] = None, remote: str = "o
             # Limit to the first N commits to avoid excessive overhead on very behind repos
             result = _run_git(
                 repo_path,
-                ["log", "--oneline", "--max-count=50", f"HEAD..{remote}/{branch}", "--reverse"],
+                ["log", "--oneline", "--max-count=50", f"HEAD..{remote_ref}", "--reverse"],
                 timeout=5,
             )
             if result.returncode == 0:

@@ -1,11 +1,16 @@
-"""Agent management commands."""
+"""Agent management commands (local operations only)."""
 
 from mcpm.utils.rich_click_config import click
 
 from .add import add_agent
+from .audit import audit_agents_cmd
+from .clean import clean_agents
+from .diff import diff_agents
 from .lint import lint_agents_cmd
 from .list import list_agents
+from .status import status_agents
 from .sync import sync_agents_cmd
+from .uninstall import uninstall_agent
 
 
 @click.group()
@@ -26,3 +31,8 @@ agents.add_command(add_agent)
 agents.add_command(sync_agents_cmd)
 agents.add_command(list_agents)
 agents.add_command(lint_agents_cmd)
+agents.add_command(diff_agents)
+agents.add_command(clean_agents)
+agents.add_command(status_agents)
+agents.add_command(audit_agents_cmd)
+agents.add_command(uninstall_agent)

@@ -156,20 +156,25 @@ def get_all_transpilers() -> Dict[str, BaseSkillTranspiler]:
 # Keys of transpilers that use append mode (single file for all skills)
 APPEND_MODE_TRANSPILERS = {"zed", "agents-md"}
 
+# Transpilers that only make sense at project level (file paths relative to project root)
+PROJECT_ONLY_TRANSPILERS = {"vscode-copilot", "zed", "agents-md"}
+
 
 def sync_skills(
     skills: List[SkillConfig],
     project_root: Path,
     client_keys: Optional[List[str]] = None,
     dry_run: bool = False,
+    global_mode: bool = False,
 ) -> LockFile:
     """Transpile all skills to target clients and write output files.
 
     Args:
         skills: List of parsed SkillConfigs.
-        project_root: Root directory of the project.
+        project_root: Root directory of the project (used for discovery).
         client_keys: Specific clients to target. None = all registered.
         dry_run: If True, compute results without writing files.
+        global_mode: If True, write to user-level paths (~/) instead of project-level.
 
     Returns:
         LockFile recording the sync state.
@@ -177,8 +182,17 @@ def sync_skills(
     lockfile = LockFile.create_now()
     transpilers = get_all_transpilers()
 
+    # In global mode, write to home directory and skip project-only transpilers
+    output_root = Path.home() if global_mode else project_root
+
     if client_keys:
         transpilers = {k: v for k, v in transpilers.items() if k in client_keys}
+
+    if global_mode:
+        skipped = {k for k in transpilers if k in PROJECT_ONLY_TRANSPILERS}
+        if skipped:
+            logger.info(f"Global mode: skipping project-only transpilers: {', '.join(skipped)}")
+        transpilers = {k: v for k, v in transpilers.items() if k not in PROJECT_ONLY_TRANSPILERS}
 
     # Separate append-mode transpilers (need all skills at once) from per-file transpilers
     per_file_transpilers = {k: v for k, v in transpilers.items() if k not in APPEND_MODE_TRANSPILERS}
@@ -194,7 +208,7 @@ def sync_skills(
 
         for client_key, transpiler in per_file_transpilers.items():
             try:
-                result = transpiler.transpile(skill, project_root)
+                result = transpiler.transpile(skill, output_root)
                 entry.clients_synced.append(client_key)
                 entry.warnings.extend(result.warnings)
 
@@ -214,7 +228,7 @@ def sync_skills(
     for client_key, transpiler in append_transpilers.items():
         try:
             if hasattr(transpiler, "transpile_all"):
-                result = transpiler.transpile_all(skills, project_root)
+                result = transpiler.transpile_all(skills, output_root)
             else:
                 continue
 

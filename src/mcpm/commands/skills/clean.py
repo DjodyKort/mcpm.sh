@@ -14,8 +14,9 @@ console = Console()
 @click.command(name="clean")
 @click.option("--client", type=str, default=None, help="Clean a specific client only")
 @click.option("--path", type=click.Path(), default=None, help="Project root (default: auto-detect)")
+@click.option("--global", "global_mode", is_flag=True, help="Clean user-level paths (~/) instead of project-level")
 @click.help_option("-h", "--help")
-def clean_skills(client, path):
+def clean_skills(client, path, global_mode):
     """Remove all mcpm-managed skill files from clients.
 
     Uses the lockfile to determine which files were managed by mcpm.
@@ -23,9 +24,15 @@ def clean_skills(client, path):
 
     \b
         mcpm skills clean
+        mcpm skills clean --global
         mcpm skills clean --client cursor
     """
-    project_root = Path(path).resolve() if path else Path.cwd()
+    if global_mode:
+        from mcpm.utils.platform import get_config_directory
+
+        project_root = get_config_directory()
+    else:
+        project_root = Path(path).resolve() if path else Path.cwd()
     config_manager = SkillsConfigManager(project_root=project_root)
     lockfile = config_manager.load_lockfile()
 
@@ -42,10 +49,12 @@ def clean_skills(client, path):
     if client:
         transpilers = {k: v for k, v in transpilers.items() if k == client}
 
+    clean_root = Path.home() if global_mode else project_root
+
     total_removed = 0
     for client_key, transpiler in transpilers.items():
         try:
-            removed = transpiler.clean(project_root, managed_skills=managed_names)
+            removed = transpiler.clean(clean_root, managed_skills=managed_names)
             for p in removed:
                 try:
                     display = p.relative_to(project_root)

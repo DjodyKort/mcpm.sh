@@ -168,7 +168,9 @@ def full_sync(project_root: Optional[Path] = None, client_keys: Optional[list] =
     result["skills_count"] = len(skills)
 
     if skills:
-        lockfile = sync_skills(skills, local_path, client_keys=client_keys)
+        # git-sync always uses global mode since its purpose is cross-machine
+        # sync to user-level locations
+        lockfile = sync_skills(skills, local_path, client_keys=client_keys, global_mode=True)
         result["lockfile"] = lockfile
 
         # Save lockfile

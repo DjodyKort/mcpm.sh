@@ -17,8 +17,9 @@ console = Console()
 @click.option("--client", type=str, default=None, help="Sync to a specific client only")
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing files")
 @click.option("--path", type=click.Path(), default=None, help="Skills repo root (default: auto-detect)")
+@click.option("--global", "global_mode", is_flag=True, help="Sync to user-level paths (~/) instead of project-level")
 @click.help_option("-h", "--help")
-def sync_skills(client, dry_run, path):
+def sync_skills(client, dry_run, path, global_mode):
     """Transpile canonical skills to all installed client formats.
 
     Reads SKILL.md files from the skills repository, renders them to each client's
@@ -27,8 +28,13 @@ def sync_skills(client, dry_run, path):
     Append-mode clients (Zed, AGENTS.md) get all skills concatenated into a single
     managed block. Per-file clients get one output file per skill.
 
+    Use --global to write to user-level paths (e.g. ~/.claude/skills/) instead of
+    project-relative paths. Project-only clients (VS Code Copilot, Zed, AGENTS.md)
+    are skipped in global mode.
+
     \b
         mcpm skills sync
+        mcpm skills sync --global
         mcpm skills sync --client claude-code
         mcpm skills sync --dry-run
     """
@@ -51,12 +57,22 @@ def sync_skills(client, dry_run, path):
     if dry_run:
         console.print("[cyan]Dry run -- no files will be written.[/]\n")
 
+    if global_mode:
+        console.print("[cyan]Global mode -- writing to user-level paths.[/]\n")
+
     # Run sync (handles both per-file and append-mode transpilers)
-    lockfile = do_sync(skills, repo_path, client_keys=client_keys, dry_run=dry_run)
+    lockfile = do_sync(skills, repo_path, client_keys=client_keys, dry_run=dry_run, global_mode=global_mode)
 
     # Save lockfile
     if not dry_run:
-        config_manager = SkillsConfigManager(project_root=repo_path)
+        if global_mode:
+            from mcpm.utils.platform import get_config_directory
+
+            global_lockfile_dir = get_config_directory()
+            global_lockfile_dir.mkdir(parents=True, exist_ok=True)
+            config_manager = SkillsConfigManager(project_root=global_lockfile_dir)
+        else:
+            config_manager = SkillsConfigManager(project_root=repo_path)
         config_manager.save_lockfile(lockfile)
 
     # Report results

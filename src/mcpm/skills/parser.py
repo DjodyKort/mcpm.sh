@@ -151,7 +151,8 @@ def discover_skills(repo_path: Path) -> List[SkillConfig]:
 def find_skills_repo(start_path: Optional[Path] = None) -> Optional[Path]:
     """Find the skills repository root by looking for mcpm-skills.yaml or skills/ directory.
 
-    Searches from start_path upward.
+    Searches from start_path upward. Falls back to the git-sync clone path
+    if configured and no local repo is found.
 
     Args:
         start_path: Starting directory (defaults to cwd).
@@ -172,5 +173,22 @@ def find_skills_repo(start_path: Optional[Path] = None) -> Optional[Path]:
         if parent == current:
             break
         current = parent
+
+    # Fallback: check git-sync clone path (reads config directly, no plugin import)
+    try:
+        from mcpm.utils.platform import get_config_directory
+
+        sync_config_path = get_config_directory() / "skills_sync.json"
+        if sync_config_path.exists():
+            import json
+
+            data = json.loads(sync_config_path.read_text(encoding="utf-8"))
+            local_path = data.get("local_path")
+            if local_path:
+                p = Path(local_path)
+                if p.exists():
+                    return p
+    except Exception:
+        pass
 
     return None

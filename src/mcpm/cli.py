@@ -4,8 +4,20 @@ MCPM CLI - Main entry point for the Model Context Protocol Manager CLI
 
 # Import rich-click configuration before anything else
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
+
+# Force UTF-8 on stdout/stderr before any Rich Console is created. Windows
+# defaults to cp1252, which chokes on the ✓/✗/~ glyphs Rich prints through
+# its legacy Win32 writer and crashes the whole command with UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(_stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
 from rich.console import Console
 from rich.traceback import Traceback

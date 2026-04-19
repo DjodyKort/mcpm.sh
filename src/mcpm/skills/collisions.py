@@ -18,9 +18,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
-
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
 from rich.console import Console
 

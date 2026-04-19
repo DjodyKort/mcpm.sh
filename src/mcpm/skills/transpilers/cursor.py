@@ -1,6 +1,7 @@
 """Cursor transpiler -- .cursor/rules/<name>/RULE.md (2.2+)."""
 
 from pathlib import Path
+from typing import List
 
 from mcpm.skills.schema import SkillConfig, TranspileResult
 from mcpm.skills.transpiler import BaseSkillTranspiler, register_transpiler
@@ -50,3 +51,12 @@ class CursorTranspiler(BaseSkillTranspiler):
     def get_output_path(self, skill: SkillConfig, project_root: Path) -> Path:
         # New format: .cursor/rules/<name>/RULE.md
         return project_root / ".cursor" / "rules" / skill.name / "RULE.md"
+
+    def get_collision_paths(self, skill: SkillConfig, project_root: Path) -> List[Path]:
+        # Cursor's pre-2.2 layout was .cursor/rules/<name>.md (flat). If that
+        # file still exists Cursor treats it as a separate rule with the same
+        # display name, so users see a duplicate.
+        return [
+            project_root / ".cursor" / "rules" / f"{skill.name}.md",
+            project_root / ".cursor" / "rules" / f"{skill.name}.mdc",
+        ]

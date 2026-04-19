@@ -3,6 +3,7 @@
 import abc
 import hashlib
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Type
 
@@ -36,6 +37,17 @@ class BaseSkillTranspiler(abc.ABC):
     @abc.abstractmethod
     def get_output_path(self, skill: SkillConfig, project_root: Path) -> Path:
         """Get the output path for a skill in this client's format."""
+
+    def get_collision_paths(self, skill: SkillConfig, project_root: Path) -> List[Path]:
+        """Other paths this client may load the same skill name from.
+
+        Override per client to declare known surface paths that are *not* the
+        primary output but where the same skill name would also resolve (e.g.
+        legacy slash-command files, older flat-layout rule files). Returned
+        paths are checked for existence during sync; collisions are reported
+        and optionally migrated.
+        """
+        return []
 
     def clean(self, project_root: Path, managed_skills: Optional[List[str]] = None) -> List[Path]:
         """Remove mcpm-managed skill files for this client.
@@ -160,13 +172,92 @@ APPEND_MODE_TRANSPILERS = {"zed", "agents-md"}
 PROJECT_ONLY_TRANSPILERS = {"vscode-copilot", "zed", "agents-md"}
 
 
+@dataclass
+class SyncResult:
+    """Outcome of a ``sync_skills()`` run.
+
+    The lockfile is the persistent record; the other fields are summaries that
+    callers (CLI commands, the pull pipeline) use to report what changed.
+    """
+
+    lockfile: LockFile
+    cleaned: List[Path] = field(default_factory=list)
+    collision_summary: Optional["CollisionSummary"] = None  # noqa: F821 - forward ref
+    output_root: Path = Path()
+
+
+def _load_previous_lockfile(output_root: Path, project_root: Path, global_mode: bool) -> Optional[LockFile]:
+    """Load the lockfile that the *previous* sync wrote, if any."""
+    from mcpm.skills.config import SkillsConfigManager
+
+    if global_mode:
+        from mcpm.utils.platform import get_config_directory
+
+        manager = SkillsConfigManager(project_root=get_config_directory())
+    else:
+        manager = SkillsConfigManager(project_root=project_root)
+    return manager.load_lockfile()
+
+
+def _collect_stale_files(
+    previous: LockFile,
+    new_lockfile: LockFile,
+    output_root: Path,
+) -> List[Path]:
+    """Return absolute paths to files written by a prior sync that are no longer current.
+
+    A file is stale if it was recorded in the previous lockfile under a skill
+    name that does not appear in the new lockfile (rename or delete upstream).
+    Append-mode transpilers manage their own files and are not tracked here.
+    """
+    stale: List[Path] = []
+    for bucket in ("skills", "rules"):
+        prev_entries: Dict[str, LockFileEntry] = getattr(previous, bucket)
+        new_entries: Dict[str, LockFileEntry] = getattr(new_lockfile, bucket)
+        for name, entry in prev_entries.items():
+            if name in new_entries:
+                continue
+            for _client, rel_paths in (entry.output_files or {}).items():
+                for rel in rel_paths:
+                    stale.append(output_root / rel)
+    return stale
+
+
+def _delete_stale(stale: List[Path]) -> List[Path]:
+    """Delete stale files and prune now-empty parent directories."""
+    deleted: List[Path] = []
+    for path in stale:
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            deleted.append(path)
+        except OSError as e:
+            logger.warning(f"Failed to remove stale file {path}: {e}")
+            continue
+        parent = path.parent
+        # Prune up to two empty parent dirs (e.g. .claude/skills/foo/)
+        for _ in range(2):
+            if parent.exists() and parent.is_dir() and not any(parent.iterdir()):
+                try:
+                    parent.rmdir()
+                    parent = parent.parent
+                except OSError:
+                    break
+            else:
+                break
+    return deleted
+
+
 def sync_skills(
     skills: List[SkillConfig],
     project_root: Path,
     client_keys: Optional[List[str]] = None,
     dry_run: bool = False,
     global_mode: bool = False,
-) -> LockFile:
+    migrate: Optional[bool] = None,
+    console: Optional["Console"] = None,  # noqa: F821 - forward ref
+) -> SyncResult:
     """Transpile all skills to target clients and write output files.
 
     Args:
@@ -175,10 +266,15 @@ def sync_skills(
         client_keys: Specific clients to target. None = all registered.
         dry_run: If True, compute results without writing files.
         global_mode: If True, write to user-level paths (~/) instead of project-level.
+        migrate: True for ``--migrate`` (auto-replace colliding files), False for
+            ``--no-migrate`` (warn-only), None to auto-detect from TTY.
+        console: Optional Rich Console for collision prompts. Defaults to a new one.
 
     Returns:
-        LockFile recording the sync state.
+        SyncResult with the new lockfile, removed stale files, and collision summary.
     """
+    from mcpm.skills.collisions import detect_collisions, resolve_collisions, resolve_mode
+
     lockfile = LockFile.create_now()
     transpilers = get_all_transpilers()
 
@@ -215,6 +311,15 @@ def sync_skills(
                 if not dry_run:
                     result.output_path.parent.mkdir(parents=True, exist_ok=True)
                     result.output_path.write_text(result.content, encoding="utf-8")
+
+                # Record the path so a later sync can clean it up if the skill
+                # is renamed or removed upstream. Stored relative to output_root
+                # so the lockfile is portable across machines.
+                try:
+                    rel = result.output_path.relative_to(output_root)
+                    entry.output_files.setdefault(client_key, []).append(str(rel))
+                except ValueError:
+                    entry.output_files.setdefault(client_key, []).append(str(result.output_path))
             except Exception as e:
                 logger.warning(f"Failed to transpile {skill.name} for {client_key}: {e}")
                 entry.warnings.append(f"{client_key}: transpilation failed: {e}")
@@ -252,4 +357,35 @@ def sync_skills(
         except Exception as e:
             logger.warning(f"Failed to transpile_all for {client_key}: {e}")
 
-    return lockfile
+    # Stale-file cleanup: anything the previous lockfile recorded but that the
+    # new sync did not produce has been renamed or removed upstream.
+    cleaned: List[Path] = []
+    previous = _load_previous_lockfile(output_root, project_root, global_mode)
+    if previous is not None:
+        stale = _collect_stale_files(previous, lockfile, output_root)
+        if stale and not dry_run:
+            cleaned = _delete_stale(stale)
+        elif stale and dry_run:
+            cleaned = stale  # Report what *would* be removed.
+
+    # Collision detection: surface pre-existing files at known shadow paths.
+    collisions = detect_collisions(skills, per_file_transpilers, output_root)
+    mode = resolve_mode(migrate)
+    summary = resolve_collisions(collisions, output_root, mode, console=console, dry_run=dry_run)
+
+    # Record any collision warnings on the relevant lockfile entries.
+    for resolution in summary.kept:
+        c = resolution.collision
+        target = lockfile.rules if c.skill_name in lockfile.rules else lockfile.skills
+        entry = target.get(c.skill_name)
+        if entry is not None:
+            entry.warnings.append(
+                f"{c.client_key}: shadowed by existing file at {c.collision_path}"
+            )
+
+    return SyncResult(
+        lockfile=lockfile,
+        cleaned=cleaned,
+        collision_summary=summary,
+        output_root=output_root,
+    )

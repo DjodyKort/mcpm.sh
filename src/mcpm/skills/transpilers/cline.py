@@ -1,6 +1,7 @@
 """Cline transpiler -- .clinerules/<name>.md."""
 
 from pathlib import Path
+from typing import List
 
 from mcpm.skills.schema import SkillConfig, TranspileResult
 from mcpm.skills.transpiler import BaseSkillTranspiler, register_transpiler
@@ -38,3 +39,7 @@ class ClineTranspiler(BaseSkillTranspiler):
 
     def get_output_path(self, skill: SkillConfig, project_root: Path) -> Path:
         return project_root / ".clinerules" / f"{skill.name}.md"
+
+    def get_collision_paths(self, skill: SkillConfig, project_root: Path) -> List[Path]:
+        # Older Cline rules were stored without an extension.
+        return [project_root / ".clinerules" / skill.name]

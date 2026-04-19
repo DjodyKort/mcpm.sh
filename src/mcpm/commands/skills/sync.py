@@ -18,8 +18,16 @@ console = Console()
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing files")
 @click.option("--path", type=click.Path(), default=None, help="Skills repo root (default: auto-detect)")
 @click.option("--global", "global_mode", is_flag=True, help="Sync to user-level paths (~/) instead of project-level")
+@click.option(
+    "--migrate/--no-migrate",
+    "migrate",
+    default=None,
+    help="On collision with a pre-existing file (e.g. ~/.claude/commands/<name>.md): "
+    "--migrate auto-replaces with backup, --no-migrate warns only. "
+    "Default: prompt in a terminal, warn in non-interactive runs.",
+)
 @click.help_option("-h", "--help")
-def sync_skills(client, dry_run, path, global_mode):
+def sync_skills(client, dry_run, path, global_mode, migrate):
     """Transpile canonical skills to all installed client formats.
 
     Reads SKILL.md files from the skills repository, renders them to each client's
@@ -37,6 +45,7 @@ def sync_skills(client, dry_run, path, global_mode):
         mcpm skills sync --global
         mcpm skills sync --client claude-code
         mcpm skills sync --dry-run
+        mcpm skills sync --global --migrate
     """
     # Find skills repo
     start_path = Path(path).resolve() if path else None
@@ -61,7 +70,16 @@ def sync_skills(client, dry_run, path, global_mode):
         console.print("[cyan]Global mode -- writing to user-level paths.[/]\n")
 
     # Run sync (handles both per-file and append-mode transpilers)
-    lockfile = do_sync(skills, repo_path, client_keys=client_keys, dry_run=dry_run, global_mode=global_mode)
+    result = do_sync(
+        skills,
+        repo_path,
+        client_keys=client_keys,
+        dry_run=dry_run,
+        global_mode=global_mode,
+        migrate=migrate,
+        console=console,
+    )
+    lockfile = result.lockfile
 
     # Save lockfile
     if not dry_run:
@@ -105,3 +123,30 @@ def sync_skills(client, dry_run, path, global_mode):
         console.print(f"\n{prefix}Updated AGENTS.md with <available_skills> block.")
     if has_zed:
         console.print(f"{prefix}Updated .rules with concatenated skills for Zed.")
+
+    # Stale-file cleanup summary
+    if result.cleaned:
+        console.print(
+            f"\n{prefix}[yellow]Removed {len(result.cleaned)} stale file(s)[/] "
+            "from prior syncs (renames or deletions):"
+        )
+        for p in result.cleaned:
+            try:
+                display = p.relative_to(result.output_root)
+            except ValueError:
+                display = p
+            console.print(f"  [red]-[/] {display}")
+
+    # Collision summary
+    summary_obj = result.collision_summary
+    if summary_obj and summary_obj.resolutions:
+        replaced = len(summary_obj.replaced)
+        kept = len(summary_obj.kept)
+        if replaced:
+            console.print(f"\n{prefix}[green]Replaced {replaced} colliding file(s)[/] (backed up).")
+        if kept:
+            console.print(
+                f"\n{prefix}[yellow]{kept} unresolved collision(s).[/] "
+                "Run [bold]mcpm skills resolve[/] to handle them, "
+                "or re-run with [bold]--migrate[/] to auto-replace."
+            )

@@ -13,6 +13,7 @@ from .diff import diff_skills
 from .init import init_skills
 from .lint import lint_skills_cmd
 from .list import list_skills
+from .resolve import resolve_skills
 from .status import status_skills
 from .sync import sync_skills
 from .uninstall import uninstall_skill
@@ -41,6 +42,7 @@ skills.add_command(list_skills)
 skills.add_command(diff_skills)
 skills.add_command(lint_skills_cmd)
 skills.add_command(clean_skills)
+skills.add_command(resolve_skills)
 skills.add_command(status_skills)
 skills.add_command(uninstall_skill)
 skills.add_command(audit_skills_cmd)

@@ -1,6 +1,7 @@
 """Claude Code transpiler -- .claude/skills/ and .claude/rules/."""
 
 from pathlib import Path
+from typing import List
 
 from mcpm.skills.schema import SkillConfig, TranspileResult
 from mcpm.skills.transpiler import BaseSkillTranspiler, register_transpiler
@@ -45,3 +46,12 @@ class ClaudeCodeTranspiler(BaseSkillTranspiler):
         if skill.skill_type == "rule":
             return project_root / ".claude" / "rules" / f"{skill.name}.md"
         return project_root / ".claude" / "skills" / skill.name / "SKILL.md"
+
+    def get_collision_paths(self, skill: SkillConfig, project_root: Path) -> List[Path]:
+        # Claude Code resolves the same name across skills/, commands/ and
+        # agents/ surfaces. A hand-written slash command or agent with the
+        # same name shadows the synced skill, so flag it for the user.
+        return [
+            project_root / ".claude" / "commands" / f"{skill.name}.md",
+            project_root / ".claude" / "agents" / f"{skill.name}.md",
+        ]

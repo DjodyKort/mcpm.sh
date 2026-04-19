@@ -97,6 +97,10 @@ class LockFileEntry(BaseModel):
     hash: str
     clients_synced: List[str] = []
     warnings: List[str] = []
+    # Per-client list of output paths written, relative to the sync output_root
+    # (project root in project mode, ~ in global mode). Used to detect and clean
+    # up stale files when skills are renamed/removed between syncs.
+    output_files: Dict[str, List[str]] = {}
 
 
 class LockFile(BaseModel):

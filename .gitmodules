@@ -2,3 +2,6 @@
 	path = plugins/mcpm-sync
 	url = https://github.com/DjodyKort/mcpm-sync.git
 	branch = feat/smart-pull
+[submodule "plugins/mcpm-mcp"]
+	path = plugins/mcpm-mcp
+	url = git@github.com:DjodyKort/mcpm-mcp.git

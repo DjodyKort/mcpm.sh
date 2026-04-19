@@ -47,6 +47,32 @@ Commands live in `src/mcpm/commands/` — each subcommand group has its own pack
 - **Rich console output**: `Console()` for stdout, `Console(stderr=True)` for errors/tracebacks
 - **Non-interactive mode**: `MCPM_NON_INTERACTIVE=true`, `MCPM_FORCE=true`, `MCPM_JSON_OUTPUT=true` env vars
 
+## Sync Architecture (who writes what, where)
+
+Three distinct repos and one staging dir. Do not confuse them.
+
+1. **Canonical skills source** — user-owned git repo (e.g. `~/Documents/GitHub/ai-skills/`, remote `DjodyKort/ai-skills`). Contains plaintext `skills/`, `agents/`, `styles/`, `rules/`, `profiles/`, `mcpm-skills.yaml`. **Only the user pushes here.** This is where edits go.
+
+2. **Local clone (read-only)** — `~/.config/mcpm/skills_repo/`. Created by `plugins/mcpm-sync/src/mcpm_sync/skills_sync.py:clone_skills_repo()`; refreshed by `pull_skills_repo()` (`git pull --ff-only`). **mcpm never pushes back to the canonical remote.** Config: `~/.config/mcpm/skills_sync.json` holds `repo`, `branch`, `local_path`.
+
+3. **Per-client transpiled output** — `~/.claude/skills/`, `~/.gemini/skills/`, `~/.cursor/rules/`, etc. Written by `src/mcpm/skills/transpiler.py:sync_skills()`. Read by Claude Code, Cursor, etc. Not synced back.
+
+4. **Encrypted cross-machine backup** — `~/.config/mcpm/sync_repo/` (remote `DjodyKort/mcpm-sync-data`). Stores AES-encrypted blobs of `skills_repo/*` + global mcpm config (`global/servers.json`, `global/sources.json`, `global/profiles_metadata.json`). Written by `plugins/mcpm-sync/src/mcpm_sync/backends/git.py:GitSyncBackend.push()` via `mcpm sync push`. Not a source — it's a backup target. Editing it directly is wrong; next push overwrites.
+
+Flow when a skill changes:
+
+```
+user edits ai-skills/skills/foo/SKILL.md → git push canonical
+mcpm skills sync → pull_skills_repo() → skills_repo updated
+                → sync_skills() → transpiles to ~/.claude/skills/, etc.
+mcpm sync push (optional) → encrypt skills_repo + global config
+                          → push to mcpm-sync-data
+```
+
+**MCP servers use a different system.** Canonical = `~/.config/mcpm/servers.json` + `sources.json`, managed by `mcpm install`/`new`/`uninstall`. Git-backed server code lives in its own clone (e.g. `~/google-docs-mcp`), independent of ai-skills. `mcpm sync push` includes servers.json + sources.json in the encrypted bundle.
+
+**Taps** — Homebrew-style third-party skill repos (`~/.config/mcpm/taps/`, managed by `plugins/mcpm-sync/src/mcpm_sync/taps.py`). Also pull-only.
+
 ## Specs & Docs
 
 - `_docs/specs/open/skills-sync.md` — Comprehensive spec: field mapping tables, activation modes, client constraints, competitive landscape, design decisions

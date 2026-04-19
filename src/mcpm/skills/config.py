@@ -160,6 +160,33 @@ TODO: Add style instructions here.
         style_file.write_text(template, encoding="utf-8")
         return style_file
 
+    def scaffold_agent(self, name: str, model: str = "inherit") -> Path:
+        """Create a new agent directory with a template AGENT.md.
+
+        Args:
+            name: Agent name (kebab-case).
+            model: Model identifier. Defaults to "inherit" (use the client's
+                default), matching Claude Code's convention.
+
+        Returns:
+            Path to the created AGENT.md.
+        """
+        agent_dir = self.project_root / "agents" / name
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        agent_file = agent_dir / "AGENT.md"
+        template = f"""---
+name: {name}
+description: "TODO: Describe when this agent should be invoked and what it produces."
+model: {model}
+---
+
+TODO: Add the agent's system prompt here. Describe the role, constraints,
+expected output format, and any tools the agent should prefer or avoid.
+"""
+        agent_file.write_text(template, encoding="utf-8")
+        return agent_file
+
     # ---- Drift Detection ----
 
     def compute_output_hash(self, path: Path) -> Optional[str]:

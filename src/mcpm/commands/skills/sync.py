@@ -60,6 +60,31 @@ def sync_skills(client, dry_run, path, global_mode, migrate):
         console.print("[yellow]No skills found in repository.[/]")
         return
 
+    # Project-mode footgun guard: without --global, sync writes to
+    # <project_root>/.claude/skills/ etc. -- where project_root is the skills
+    # repo returned by find_skills_repo. If the user didn't point at that
+    # path explicitly (no --path) AND their cwd isn't inside it, then
+    # find_skills_repo resolved via the git-sync fallback and the output
+    # would never reach any installed client -- it would land inside an
+    # unrelated centralised repo. Refuse instead of silently producing
+    # dead files.
+    if not global_mode and not path:
+        repo_resolved = repo_path.resolve()
+        cwd_resolved = Path.cwd().resolve()
+        cwd_inside_repo = cwd_resolved == repo_resolved or repo_resolved in cwd_resolved.parents
+        if not cwd_inside_repo:
+            console.print(
+                "[red]Error: project-mode sync would write into "
+                f"[yellow]{repo_path}[/] (auto-detected skills repo), but cwd is "
+                "not inside it -- no client will read from there.[/]"
+            )
+            console.print(
+                "Use [cyan]--global[/] to sync to user-level paths (e.g. "
+                "~/.claude/skills/), pass [cyan]--path[/] to opt in to a specific "
+                "project root explicitly, or cd into the skills repo first."
+            )
+            return
+
     # Determine target clients
     client_keys = [client] if client else None
 

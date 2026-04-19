@@ -21,13 +21,16 @@ git submodule update --init --recursive
 # Install mcpm (editable — changes take effect immediately)
 uv tool install --force --editable .
 
-# Install sync plugin into mcpm's environment
-uv pip install --python "$(uv tool dir)/mcpm/bin/python" -e plugins/mcpm-sync
+# Install plugins into mcpm's environment
+mcpmPython="$(uv tool dir)/mcpm/bin/python"
+uv pip install --python "$mcpmPython" -e plugins/mcpm-sync
+uv pip install --python "$mcpmPython" -e plugins/mcpm-mcp
 
 # Verify
 mcpm --version
 mcpm skills ls
 mcpm sync --help
+mcpm mcp doctor
 ```
 
 ## Windows (PowerShell)
@@ -42,15 +45,43 @@ git submodule update --init --recursive
 # Install mcpm (editable)
 uv tool install --force --editable .
 
-# Install sync plugin into mcpm's environment
+# Install plugins into mcpm's environment
 $mcpmPython = Join-Path (uv tool dir) "mcpm\Scripts\python.exe"
 uv pip install --python $mcpmPython -e plugins/mcpm-sync
+uv pip install --python $mcpmPython -e plugins/mcpm-mcp
 
 # Verify
 mcpm --version
 mcpm skills ls
 mcpm sync --help
+mcpm mcp doctor
 ```
+
+### Windows: "Access is denied" on `uv tool install`
+
+On Windows, `uv tool install --force` can fail with:
+
+```
+error: failed to remove directory `...\uv\tools\mcpm\Scripts`: Access is denied. (os error 5)
+```
+
+This means another process is holding `mcpm.exe` or a DLL open — typically MCP servers spawned by Claude Code, Claude Desktop, or another shell running `mcpm run ...`.
+
+Find and stop them before retrying:
+
+```powershell
+# List holding processes
+Get-Process | Where-Object { $_.Path -like "*\uv\tools\mcpm\*" } |
+    Format-Table Id, ProcessName, Path -AutoSize
+
+# Kill them all
+Get-Process | Where-Object { $_.Path -like "*\uv\tools\mcpm\*" } | Stop-Process -Force
+
+# Retry
+uv tool install --force --editable .
+```
+
+Clients that had MCP servers running (Claude Code/Desktop) will respawn them on next use.
 
 ## New machine setup
 
@@ -105,7 +136,20 @@ mcpm client edit claude-code
 
 Interactive selection — enable the servers you want per client. This writes `mcpm_*` entries (using `mcpm run <name>`) to each client's config.
 
-### 5. Optional: git-sync for direct skill editing
+### 5. Optional: register mcpm-mcp in clients
+
+Expose mcpm's entity tools (skills/agents/styles/servers) to AI clients so they can list, scaffold, edit and sync via typed tool calls instead of re-deriving the sync architecture each session.
+
+```bash
+mcpm mcp install claude-code
+mcpm mcp install claude-desktop
+mcpm mcp tools             # list exposed tools
+mcpm mcp doctor            # sanity check
+```
+
+Mutating tools require explicit `confirm=true`. See `plugins/mcpm-mcp/README.md` for the full tool matrix.
+
+### 6. Optional: git-sync for direct skill editing
 
 ```bash
 mcpm sync git-sync --repo git@github.com:DjodyKort/ai-skills.git --auto

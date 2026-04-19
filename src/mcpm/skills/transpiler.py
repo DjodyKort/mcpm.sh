@@ -280,6 +280,8 @@ def sync_skills(
 
     # In global mode, write to home directory and skip project-only transpilers
     output_root = Path.home() if global_mode else project_root
+    lockfile.scope = "global" if global_mode else "project"
+    lockfile.output_root = str(output_root)
 
     if client_keys:
         transpilers = {k: v for k, v in transpilers.items() if k in client_keys}

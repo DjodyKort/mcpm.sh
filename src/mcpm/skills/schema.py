@@ -108,6 +108,12 @@ class LockFile(BaseModel):
 
     version: int = 1
     synced_at: str = ""
+    # Scope of the last sync: "global" (user-level, ~/) or "project" (cwd/project).
+    # Empty string preserved for backward compatibility with pre-scope lockfiles.
+    scope: str = ""
+    # Absolute path of the output root the lockfile describes. Lets users and
+    # tooling detect a scope/path drift without having to guess from context.
+    output_root: str = ""
     skills: Dict[str, LockFileEntry] = {}
     rules: Dict[str, LockFileEntry] = {}
     agents: Dict[str, LockFileEntry] = {}

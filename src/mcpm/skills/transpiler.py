@@ -3,6 +3,7 @@
 import abc
 import hashlib
 import logging
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Type
@@ -14,6 +15,58 @@ logger = logging.getLogger(__name__)
 # Managed block delimiters for append-mode targets
 MCPM_BLOCK_START = "<!-- mcpm:start -->"
 MCPM_BLOCK_END = "<!-- mcpm:end -->"
+
+# Subdirectories within a skill source that are transpiled alongside SKILL.md.
+# Lets skills use progressive disclosure: SKILL.md stays slim while module/
+# reference content lives in adjacent files that the LLM reads on demand.
+SKILL_ASSET_DIRS = ("modules", "reference", "templates", "examples", "assets")
+SKILL_ASSET_EXTENSIONS = (
+    ".md", ".txt", ".json", ".yaml", ".yml",
+    ".png", ".svg", ".jpg", ".jpeg", ".webp",
+)
+
+
+def _copy_skill_assets(
+    src_dir: Path,
+    dst_dir: Path,
+    output_root: Path,
+) -> List[str]:
+    """Copy skill asset subdirectories alongside the transpiled SKILL.md.
+
+    Walks the source skill directory for any of SKILL_ASSET_DIRS, copies their
+    contents recursively into the per-client output directory, filtering by
+    SKILL_ASSET_EXTENSIONS so binary build artifacts and IDE files do not leak
+    into client paths.
+
+    Args:
+        src_dir: Source skill directory (containing the canonical SKILL.md).
+        dst_dir: Destination directory (containing the per-client SKILL.md).
+        output_root: Sync output root used to compute relative paths for the
+            lockfile entry.
+
+    Returns:
+        List of relative paths (relative to output_root) of files written.
+        Empty if no asset subdirs exist.
+    """
+    written: List[str] = []
+    for subdir_name in SKILL_ASSET_DIRS:
+        src_subdir = src_dir / subdir_name
+        if not src_subdir.is_dir():
+            continue
+        for src_file in src_subdir.rglob("*"):
+            if not src_file.is_file():
+                continue
+            if src_file.suffix.lower() not in SKILL_ASSET_EXTENSIONS:
+                continue
+            rel = src_file.relative_to(src_dir)
+            dst_file = dst_dir / rel
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)
+            try:
+                written.append(str(dst_file.relative_to(output_root)))
+            except ValueError:
+                written.append(str(dst_file))
+    return written
 
 
 class BaseSkillTranspiler(abc.ABC):
@@ -322,6 +375,25 @@ def sync_skills(
                     entry.output_files.setdefault(client_key, []).append(str(rel))
                 except ValueError:
                     entry.output_files.setdefault(client_key, []).append(str(result.output_path))
+
+                # Progressive-disclosure asset subdirectories (modules/,
+                # reference/, templates/, examples/, assets/) are copied
+                # alongside the transpiled SKILL.md. Only meaningful for
+                # skill-style outputs where the per-client output lives in a
+                # per-skill directory; rules and flat-layout outputs do not
+                # have a sibling directory to populate.
+                if (
+                    not dry_run
+                    and skill.skill_type == "skill"
+                    and result.output_path.name == "SKILL.md"
+                ):
+                    asset_files = _copy_skill_assets(
+                        src_dir=skill.source_path.parent,
+                        dst_dir=result.output_path.parent,
+                        output_root=output_root,
+                    )
+                    if asset_files:
+                        entry.output_files.setdefault(client_key, []).extend(asset_files)
             except Exception as e:
                 logger.warning(f"Failed to transpile {skill.name} for {client_key}: {e}")
                 entry.warnings.append(f"{client_key}: transpilation failed: {e}")

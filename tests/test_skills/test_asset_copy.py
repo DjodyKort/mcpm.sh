@@ -13,6 +13,7 @@ from mcpm.skills.transpiler import (
     SKILL_ASSET_DIRS,
     SKILL_ASSET_EXTENSIONS,
     _copy_skill_assets,
+    compute_skill_hash,
     sync_skills,
 )
 
@@ -185,6 +186,69 @@ class TestSyncSkillsAssetIntegration:
         assert list(skill_dir.iterdir()) == [skill_dir / "SKILL.md"]
         entry = result.lockfile.skills["plain-skill"]
         assert len(entry.output_files["claude-code"]) == 1
+
+    def test025_asset_drift_detected_in_lockfile_hash(self, tmp_path, monkeypatch):
+        """Editing a module file changes the skill hash so status/diff detect
+        the drift. Without asset-aware hashing, asset edits would silently
+        fail to trigger a re-sync.
+        """
+        monkeypatch.setenv("MCPM_NON_INTERACTIVE", "true")
+        repo = tmp_path / "skills-repo"
+        repo.mkdir()
+        (repo / "mcpm-skills.yaml").write_text("name: t\n")
+        (repo / "skills").mkdir()
+        skill_v1 = _make_skill_with_assets(
+            repo,
+            "drift-test",
+            asset_files={"modules/m.md": "version one"},
+        )
+        hash_v1 = compute_skill_hash(skill_v1)
+
+        # Edit the module file without touching SKILL.md
+        (repo / "skills" / "drift-test" / "modules" / "m.md").write_text("version two")
+        skill_v2 = parse_skill_file(repo / "skills" / "drift-test" / "SKILL.md")
+        hash_v2 = compute_skill_hash(skill_v2)
+
+        assert hash_v1 != hash_v2, (
+            "asset edit must change the skill hash, otherwise drift goes undetected"
+        )
+
+    def test026_skill_md_only_change_changes_hash(self, tmp_path):
+        """Sanity: editing SKILL.md still changes the hash."""
+        repo = tmp_path / "skills-repo"
+        repo.mkdir()
+        (repo / "mcpm-skills.yaml").write_text("name: t\n")
+        (repo / "skills").mkdir()
+        skill_v1 = _make_skill_with_assets(repo, "skill-edit-test")
+        hash_v1 = compute_skill_hash(skill_v1)
+
+        # Modify SKILL.md
+        skill_path = repo / "skills" / "skill-edit-test" / "SKILL.md"
+        skill_path.write_text(skill_path.read_text() + "\nadditional content\n")
+        skill_v2 = parse_skill_file(skill_path)
+        hash_v2 = compute_skill_hash(skill_v2)
+
+        assert hash_v1 != hash_v2
+
+    def test027_unrelated_dir_does_not_affect_hash(self, tmp_path):
+        """A non-whitelist subdir (e.g., docs/) is excluded from the hash so
+        local notes do not trigger spurious drift.
+        """
+        repo = tmp_path / "skills-repo"
+        repo.mkdir()
+        (repo / "mcpm-skills.yaml").write_text("name: t\n")
+        (repo / "skills").mkdir()
+        skill_v1 = _make_skill_with_assets(repo, "unrelated-test")
+        hash_v1 = compute_skill_hash(skill_v1)
+
+        # Add a file in a non-whitelist subdir
+        non_whitelist = repo / "skills" / "unrelated-test" / "docs"
+        non_whitelist.mkdir()
+        (non_whitelist / "design.md").write_text("local design notes")
+        skill_v2 = parse_skill_file(repo / "skills" / "unrelated-test" / "SKILL.md")
+        hash_v2 = compute_skill_hash(skill_v2)
+
+        assert hash_v1 == hash_v2
 
     def test030_extension_filter_at_sync_level(self, tmp_path, monkeypatch):
         """A skill with mixed file types in modules/ syncs only the allowed

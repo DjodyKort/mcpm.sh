@@ -59,6 +59,55 @@ class TestAddCommand:
         result = runner.invoke(skills, ["add", "Invalid-Name", "--path", str(tmp_path)])
         assert "invalid" in result.output.lower() or "error" in result.output.lower()
 
+    def test_add_with_progressive_creates_subdirs(self, runner, tmp_path):
+        """--with-progressive scaffolds modules, reference, templates subdirs
+        with stub files alongside SKILL.md.
+        """
+        SkillsConfigManager(project_root=tmp_path).init_repo()
+
+        result = runner.invoke(
+            skills,
+            ["add", "modular-skill", "--with-progressive", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 0
+        skill_dir = tmp_path / "skills" / "modular-skill"
+        assert (skill_dir / "SKILL.md").exists()
+        assert (skill_dir / "modules" / "example.md").exists()
+        assert (skill_dir / "reference" / "example.md").exists()
+        assert (skill_dir / "templates" / "example.md").exists()
+        # Stubs are non-empty
+        assert (skill_dir / "modules" / "example.md").read_text().strip()
+        assert "progressive-disclosure" in result.output.lower() or "modules/" in result.output
+
+    def test_add_with_progressive_rejects_rule(self, runner, tmp_path):
+        """--with-progressive only makes sense for skills, not rules."""
+        SkillsConfigManager(project_root=tmp_path).init_repo()
+
+        result = runner.invoke(
+            skills,
+            [
+                "add",
+                "my-rule",
+                "--type",
+                "rule",
+                "--with-progressive",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        assert "only valid for skills" in result.output.lower() or result.exit_code != 0
+
+    def test_add_without_progressive_no_subdirs(self, runner, tmp_path):
+        """Default behavior: no asset subdirs created."""
+        SkillsConfigManager(project_root=tmp_path).init_repo()
+
+        runner.invoke(skills, ["add", "plain", "--path", str(tmp_path)])
+        skill_dir = tmp_path / "skills" / "plain"
+        assert (skill_dir / "SKILL.md").exists()
+        assert not (skill_dir / "modules").exists()
+        assert not (skill_dir / "reference").exists()
+        assert not (skill_dir / "templates").exists()
+
     def test_add_duplicate(self, runner, tmp_path):
         """Test that duplicate skill names are rejected."""
         SkillsConfigManager(project_root=tmp_path).init_repo()

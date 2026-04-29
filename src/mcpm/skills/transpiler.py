@@ -178,9 +178,41 @@ def inject_managed_block(existing_content: str, block_content: str) -> str:
 
 
 def compute_skill_hash(skill: SkillConfig) -> str:
-    """Compute a SHA256 hash of a skill's source file content."""
-    content = skill.source_path.read_text(encoding="utf-8")
-    return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    """Compute a SHA256 hash covering SKILL.md and all asset files.
+
+    Hashes SKILL.md content plus the content of every file in the
+    SKILL_ASSET_DIRS subdirectories (filtered by SKILL_ASSET_EXTENSIONS).
+    Asset files are sorted by relative path so the hash is deterministic.
+
+    Including assets lets `status` and `diff` detect drift when the user
+    edits a module or reference file without touching SKILL.md. Without
+    this, asset edits would silently fail to trigger a re-sync.
+    """
+    h = hashlib.sha256()
+    src_dir = skill.source_path.parent
+
+    # SKILL.md first, marked for clarity in the digest stream.
+    h.update(b"SKILL.md\n")
+    h.update(skill.source_path.read_bytes())
+    h.update(b"\n---\n")
+
+    # Asset files, in deterministic relative-path order.
+    asset_files = []
+    for subdir_name in SKILL_ASSET_DIRS:
+        subdir = src_dir / subdir_name
+        if not subdir.is_dir():
+            continue
+        for path in subdir.rglob("*"):
+            if path.is_file() and path.suffix.lower() in SKILL_ASSET_EXTENSIONS:
+                asset_files.append(path)
+    asset_files.sort(key=lambda p: str(p.relative_to(src_dir)))
+    for path in asset_files:
+        rel = path.relative_to(src_dir)
+        h.update(f"{rel}\n".encode("utf-8"))
+        h.update(path.read_bytes())
+        h.update(b"\n---\n")
+
+    return "sha256:" + h.hexdigest()[:16]
 
 
 # ---- Transpiler Registry ----

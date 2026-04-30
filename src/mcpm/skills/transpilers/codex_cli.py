@@ -1,4 +1,4 @@
-"""Codex CLI transpiler -- .agents/skills/<name>/SKILL.md."""
+"""Codex CLI transpiler -- ~/.codex/skills/ (global) or .agents/skills/ (project)."""
 
 from pathlib import Path
 
@@ -34,4 +34,8 @@ class CodexCliTranspiler(BaseSkillTranspiler):
         )
 
     def get_output_path(self, skill: SkillConfig, project_root: Path) -> Path:
+        # Global mode (project_root == home): use ~/.codex/skills/ to avoid
+        # polluting ~/.agents/skills/, which Gemini CLI treats as a high-priority alias.
+        if project_root == Path.home():
+            return project_root / ".codex" / "skills" / skill.name / "SKILL.md"
         return project_root / ".agents" / "skills" / skill.name / "SKILL.md"

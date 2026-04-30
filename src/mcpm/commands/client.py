@@ -1349,3 +1349,181 @@ def _edit_client_non_interactive(
     except Exception as e:
         console.print(f"[red]Error updating client configuration: {e}[/]")
         return 1
+
+
+# -------------------------------------------------------------------------
+# `mcpm client sync` — re-emit every mcpm-managed entry based on each
+# server's currently resolved proxy_mode. Phase 4 of the router rollout.
+# -------------------------------------------------------------------------
+
+
+_LEGACY_PREFIX = "_legacy_"
+
+
+@client.command(name="sync", context_settings=dict(help_option_names=["-h", "--help"]))
+@click.option("--safe", is_flag=True, help="Dual-entry mode: write new + keep _legacy_ alongside.")
+@click.option("--legacy", "force_legacy", is_flag=True, help="Force every entry back to `mcpm run X`.")
+@click.option("--client", "client_filter", help="Only sync the named client (e.g. cursor).")
+@click.option("--dry-run", is_flag=True, help="Show what would change without writing.")
+def sync_clients(safe: bool, force_legacy: bool, client_filter: str, dry_run: bool):
+    """Rewrite every mcpm-managed entry across installed clients.
+
+    Reads each server's current proxy_mode from servers.json and re-emits
+    the client-side entry via the resolver. By default this is destructive
+    (overwrites the old shape). Use --safe to keep a `_legacy_` companion
+    so you can roll back. Use --legacy to revert everything to the
+    pre-router shape.
+    """
+    if safe and force_legacy:
+        console.print("[red]--safe and --legacy are mutually exclusive.[/]")
+        sys.exit(2)
+
+    backups_dir = None
+    if not dry_run:
+        from datetime import datetime
+        from pathlib import Path
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backups_dir = Path.home() / ".cache" / "mcpm" / "migrations" / ts
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"[dim]Backups will be written to {backups_dir}[/]")
+
+    installed = ClientRegistry.detect_installed_clients()
+    target_clients = [c for c, ok in installed.items() if ok]
+    if client_filter:
+        target_clients = [c for c in target_clients if c == client_filter]
+    if not target_clients:
+        console.print("[yellow]No installed clients found to sync.[/]")
+        return
+
+    total_changed = 0
+    for client_key in sorted(target_clients):
+        manager = ClientRegistry.get_client_manager(client_key)
+        if manager is None:
+            continue
+        info = ClientRegistry.get_client_info(client_key)
+        display = info.get("name", client_key)
+
+        before, after, changed = _plan_sync(
+            manager,
+            display,
+            force_legacy=force_legacy,
+            keep_legacy=safe,
+        )
+        if not changed:
+            console.print(f"[dim]{display}: nothing to do.[/]")
+            continue
+
+        console.print(f"[bold]{display}[/]: {len(changed)} entr{'y' if len(changed) == 1 else 'ies'} will change.")
+        for name, kind in changed:
+            console.print(f"  • {name} → {kind}")
+
+        if dry_run:
+            total_changed += len(changed)
+            continue
+
+        # Backup the raw client config file before mutation.
+        if backups_dir is not None:
+            try:
+                config_path = manager.config_path
+                if os.path.exists(config_path):
+                    backup_path = backups_dir / f"{client_key}.json.bak"
+                    backup_path.write_bytes(open(config_path, "rb").read())
+            except Exception as exc:
+                console.print(f"[yellow]Backup failed for {display}: {exc}[/]")
+
+        _apply_sync(manager, before, after)
+        total_changed += len(changed)
+
+    if total_changed:
+        if dry_run:
+            console.print(
+                f"[yellow]Dry run: {total_changed} entr"
+                f"{'y' if total_changed == 1 else 'ies'} would change.[/] "
+                "Re-run without --dry-run to apply."
+            )
+        else:
+            console.print(
+                f"[green]Sync complete. {total_changed} entr"
+                f"{'y' if total_changed == 1 else 'ies'} updated.[/]"
+            )
+            if not force_legacy:
+                console.print("[dim]Restart your MCP clients for the changes to take effect.[/]")
+    else:
+        console.print("[dim]No changes needed.[/]")
+
+
+def _plan_sync(client_manager, display_name: str, *, force_legacy: bool, keep_legacy: bool):
+    """Return (before, after, changed) for one client.
+
+    `before` and `after` are the full {server_name: client_config_dict} maps.
+    `changed` is a list of (server_name, kind) tuples for the user log,
+    where kind is one of: "rewritten", "added new (kept legacy)",
+    "forced legacy", "no-op".
+    """
+
+    raw_servers = client_manager.get_servers()
+    before = {name: dict(cfg) if isinstance(cfg, dict) else cfg for name, cfg in raw_servers.items()}
+    after: dict = dict(before)
+    changed: list[tuple[str, str]] = []
+
+    for entry_name, entry in list(before.items()):
+        # Skip legacy companions (will be regenerated by sync if needed).
+        if entry_name.startswith(_LEGACY_PREFIX):
+            continue
+
+        cmd = entry.get("command") if isinstance(entry, dict) else getattr(entry, "command", None)
+        args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
+        if cmd != "mcpm":
+            continue
+        if not args or args[0] not in ("run", "bridge"):
+            continue
+        original_server_name = args[1] if len(args) > 1 else None
+        if not original_server_name:
+            continue
+
+        registered = global_config_manager.get_server(original_server_name)
+        if registered is None:
+            continue
+
+        if force_legacy:
+            new_entry = {
+                "command": "mcpm",
+                "args": ["run", original_server_name],
+            }
+            kind = "forced legacy"
+        else:
+            # Temporarily flip the server's proxy_mode hint based on what
+            # the manager supports, then call the manager's own to_client_format
+            # so the resolver runs.
+            new_entry = client_manager.to_client_format(registered)
+            kind = "rewritten"
+
+        if new_entry == entry:
+            continue
+
+        after[entry_name] = new_entry
+        if keep_legacy and not force_legacy:
+            legacy_key = f"{_LEGACY_PREFIX}{entry_name}"
+            after[legacy_key] = {
+                "command": "mcpm",
+                "args": ["run", original_server_name],
+            }
+            kind = "added new (kept legacy)"
+
+        # Also: if the server resolves to the bridge shape (Phase 5), we
+        # write that explicitly. The resolver itself does not yet emit
+        # bridge entries; that path activates when supports_http_mcp=False.
+        # `mcpm client sync` for stdio-only clients still produces legacy
+        # for now until we flip the default in Phase 5.
+        changed.append((entry_name, kind))
+
+    return before, after, changed
+
+
+def _apply_sync(client_manager, before: dict, after: dict) -> None:
+    """Persist the new entry map by writing the underlying config file."""
+    config = client_manager._load_config()
+    section_key = getattr(client_manager, "configure_key_name", "mcpServers")
+    config[section_key] = after
+    client_manager._save_config(config)

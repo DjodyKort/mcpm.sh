@@ -34,12 +34,19 @@ class TestBaseClientManagerViaWindsurf:
 
     @pytest.fixture
     def sample_server_config(self):
-        """Create a sample ServerConfig for testing"""
+        """Create a sample ServerConfig for testing.
+
+        Uses ``proxy_mode="direct"`` so the resolver emits the raw command
+        shape this test was written against; with the default ``auto`` mode
+        a stdio server's client config now resolves to the legacy
+        ``mcpm run X`` wrapper (or a router URL once Phase 2 lands).
+        """
         return STDIOServerConfig(
             name="sample-server",
             command="npx",
             args=["-y", "@modelcontextprotocol/sample-server"],
             env={"API_KEY": "sample-key"},
+            proxy_mode="direct",
         )
 
     def test_list_servers(self, windsurf_manager):

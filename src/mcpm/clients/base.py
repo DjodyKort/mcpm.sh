@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import TypeAdapter
 from ruamel.yaml import YAML
 
-from mcpm.core.schema import ServerConfig, STDIOServerConfig
+from mcpm.core.schema import RemoteServerConfig, ServerConfig, STDIOServerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +170,11 @@ class JSONClientManager(BaseClientManager):
     """
 
     configure_key_name: str = "mcpServers"
+    # Whether this client supports `type: http` MCP entries directly. Clients that
+    # only speak stdio (older Claude Desktop builds, embedded extensions) override
+    # this to False so `auto` resolution falls back to the legacy `mcpm run` shape
+    # or, when the router exists, the `mcpm bridge` shim.
+    supports_http_mcp: bool = True
 
     def __init__(self, config_path_override: Optional[str] = None):
         """Initialize the JSON client manager"""
@@ -282,6 +287,34 @@ class JSONClientManager(BaseClientManager):
 
         return self._save_config(config)
 
+    def _resolve_proxy_mode(self, server_config: ServerConfig) -> str:
+        """Resolve the effective proxy_mode for a server in this client's context.
+
+        Resolution rules (in order):
+        - Explicit override on the server (anything other than ``"auto"``) wins.
+        - For stdio-only clients (``supports_http_mcp = False``):
+            - Stdio servers resolve to ``"bridge"`` so they share workers via
+              the local router. Override with ``mcpm mode X legacy`` to revert.
+            - Remote (HTTP) servers resolve to ``"legacy"``; the router only
+              proxies stdio. Client-specific overrides (e.g. Claude Desktop's
+              ``uvx mcp-proxy`` shim) intercept before this point.
+        - For HTTP-capable clients:
+            - HTTP servers resolve to ``"direct"`` so the native OAuth flow
+              round-trips end-to-end.
+            - Stdio servers resolve to ``"legacy"`` for now. Opt them into the
+              router with ``mcpm mode X router`` once the router is trusted.
+        """
+        explicit = getattr(server_config, "proxy_mode", "auto")
+        if explicit and explicit != "auto":
+            return explicit
+        if not getattr(self, "supports_http_mcp", True):
+            if isinstance(server_config, STDIOServerConfig):
+                return "bridge"
+            return "legacy"
+        if isinstance(server_config, RemoteServerConfig):
+            return "direct"
+        return "legacy"
+
     def to_client_format(self, server_config: ServerConfig) -> Dict[str, Any]:
         """Convert ServerConfig to client-specific format with common core fields
 
@@ -295,21 +328,86 @@ class JSONClientManager(BaseClientManager):
         Returns:
             Dict containing client-specific configuration with core fields
         """
-        # Base result containing only essential execution information
+        # Idempotency hatch: an STDIOServerConfig that already encodes a mcpm
+        # invocation (`command="mcpm"`) is passed through verbatim. This keeps
+        # the legacy install/edit flow in commands/client.py — which constructs
+        # `STDIOServerConfig(command="mcpm", args=["run", name])` directly —
+        # working without double-wrapping.
+        if (
+            isinstance(server_config, STDIOServerConfig)
+            and server_config.command == "mcpm"
+            and getattr(server_config, "proxy_mode", "auto") == "auto"
+        ):
+            result = {
+                "command": server_config.command,
+                "args": server_config.args,
+            }
+            non_empty_env = server_config.get_filtered_env_vars(os.environ)
+            if non_empty_env:
+                result["env"] = non_empty_env
+            return result
+
+        effective = self._resolve_proxy_mode(server_config)
+
+        if effective == "direct":
+            if isinstance(server_config, RemoteServerConfig):
+                # Direct HTTP entry: mcpm is not in the request path. Native client
+                # OAuth metadata + WWW-Authenticate flow round-trips end to end.
+                result: Dict[str, Any] = {"type": "http", "url": server_config.url}
+                if server_config.headers:
+                    result["headers"] = {k: str(v) for k, v in server_config.headers.items()}
+                return result
+            if isinstance(server_config, STDIOServerConfig):
+                # Raw upstream command. Bypasses mcpm at runtime: no monitoring,
+                # no auth header injection, but no overhead either.
+                result = {
+                    "command": server_config.command,
+                    "args": server_config.args,
+                }
+                non_empty_env = server_config.get_filtered_env_vars(os.environ)
+                if non_empty_env:
+                    result["env"] = non_empty_env
+                return result
+
+        if effective == "legacy":
+            # The original mcpm-managed shape: spawn `mcpm run X` per client
+            # invocation. Preserves the v1/v2 behavior; useful as a revert
+            # path or for clients that don't yet speak HTTP MCP.
+            return {"command": "mcpm", "args": ["run", server_config.name]}
+
+        if effective == "bridge":
+            # Stdio-managed proxy to the local router. Used by clients that
+            # cannot speak HTTP MCP directly. The shim itself is ~10 MB Python
+            # and shares the upstream worker with every other client.
+            return {"command": "mcpm", "args": ["bridge", server_config.name]}
+
+        if effective == "router":
+            # Lazy import: avoids circulars and keeps Phase-1-only deployments
+            # from auto-launching the router daemon at config-write time.
+            from mcpm.router.runtime import RouterRuntime
+
+            runtime = RouterRuntime.read_or_launch()
+            return {
+                "type": "http",
+                "url": f"http://127.0.0.1:{runtime.port}/{server_config.name}/mcp",
+                "headers": {"Mcp-Mcpm-Token": runtime.token},
+            }
+
+        # Fallback for unrecognized modes / custom configs: strip mcpm-internal
+        # fields and emit whatever the config naturally serializes to.
         if isinstance(server_config, STDIOServerConfig):
             result = {
                 "command": server_config.command,
                 "args": server_config.args,
             }
-
-            # Add filtered environment variables if present
             non_empty_env = server_config.get_filtered_env_vars(os.environ)
             if non_empty_env:
                 result["env"] = non_empty_env
-        else:
-            result = server_config.to_dict()
-
-        return result
+            return result
+        raw = server_config.to_dict()
+        for internal_key in ("name", "profile_tags", "proxy_mode", "requires_session_pinning"):
+            raw.pop(internal_key, None)
+        return raw
 
     @classmethod
     def from_client_format(cls, server_name: str, client_config: Dict[str, Any]) -> ServerConfig:

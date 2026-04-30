@@ -1,11 +1,15 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel
+
+ProxyMode = Literal["auto", "router", "direct", "legacy", "bridge"]
 
 
 class BaseServerConfig(BaseModel):
     name: str
     profile_tags: List[str] = []
+    proxy_mode: ProxyMode = "auto"
+    requires_session_pinning: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return self.model_dump()
@@ -87,6 +91,11 @@ class RemoteServerConfig(BaseServerConfig):
             name=self.name,
             command="uvx",
             args=proxy_args,
+            # The synthesized stdio config is a transparent stdio shim around
+            # the remote URL; mcpm itself is not in the runtime path. Pin it
+            # to "direct" so the resolver emits raw command/args instead of
+            # falling into the legacy `mcpm run` wrapper.
+            proxy_mode="direct",
         )
 
 

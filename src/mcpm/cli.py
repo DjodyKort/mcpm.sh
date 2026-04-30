@@ -44,6 +44,9 @@ from mcpm.commands import (
     usage,
 )
 from mcpm.commands.agents import agents
+from mcpm.commands.bridge import bridge_cmd
+from mcpm.commands.gateway import gateway as gateway_group
+from mcpm.commands.mode import mode_cmd
 from mcpm.commands.share import share
 from mcpm.commands.styles import styles as styles_group
 from mcpm.utils.logging_config import setup_logging
@@ -166,6 +169,34 @@ main.add_command(share)
 
 # Keep these for now but they could be simplified later
 main.add_command(client.client)
+
+# Phase 4 (router rollout): gateway/mode/bridge surface.
+main.add_command(gateway_group, name="gateway")
+main.add_command(mode_cmd, name="mode")
+main.add_command(bridge_cmd, name="bridge")
+
+
+# ---- Internal entry points (router daemon + workers) ----
+# These are spawned by `RouterRuntime._launch` and `WorkerSupervisor._spawn`
+# respectively. They're hidden from `--help` because end users should never
+# call them directly.
+
+
+@main.command(name="_router", hidden=True, context_settings=dict(help_option_names=["-h", "--help"]))
+def _router_entry():
+    """[Internal] Run the mcpm router daemon. Called by RouterRuntime._launch."""
+    from mcpm.router.server_main import main as router_main
+
+    sys.exit(router_main())
+
+
+@main.command(name="_worker", hidden=True, context_settings=dict(help_option_names=["-h", "--help"]))
+@click.argument("server_name")
+def _worker_entry(server_name: str):
+    """[Internal] Run a per-server worker. Called by WorkerSupervisor._spawn."""
+    from mcpm.worker.main import main as worker_main
+
+    sys.exit(worker_main(server_name))
 
 
 # ---- Plugin Loading (Entry Points) ----

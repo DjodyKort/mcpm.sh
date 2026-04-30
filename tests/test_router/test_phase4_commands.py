@@ -338,6 +338,139 @@ def test111_client_sync_planner_force_legacy_does_not_touch_unmanaged(isolated_h
         os.unlink(path)
 
 
+def test115_client_sync_prunes_orphaned_legacy_companions(isolated_home, monkeypatch):
+    """A non-safe sync that rewrites a primary entry must remove its
+    `_legacy_<X>` companion if one is present (cleanup of a prior --safe run)."""
+    from mcpm.commands.client import _plan_sync
+
+    config = GlobalConfigManager(
+        config_path=isolated_home / ".config" / "mcpm" / "servers.json",
+        metadata_path=isolated_home / ".config" / "mcpm" / "profiles_metadata.json",
+    )
+    config.add_server(RemoteServerConfig(name="clickup", url="https://mcp.clickup.com/mcp"))
+    monkeypatch.setattr("mcpm.commands.client.global_config_manager", config)
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        # Simulate state right after a `--safe` run: legacy companion present,
+        # primary still in old shape (will be rewritten this pass).
+        f.write(json.dumps({
+            "mcpServers": {
+                "mcpm_clickup": {"command": "mcpm", "args": ["run", "clickup"]},
+                "_legacy_mcpm_clickup": {"command": "mcpm", "args": ["run", "clickup"]},
+            }
+        }).encode("utf-8"))
+        path = f.name
+    try:
+        manager = _FakeClient(config_path_override=path)
+        _, after, changed = _plan_sync(
+            manager, "Fake", force_legacy=False, keep_legacy=False
+        )
+        # Primary rewritten to direct HTTP, companion removed.
+        assert after["mcpm_clickup"]["type"] == "http"
+        assert "_legacy_mcpm_clickup" not in after
+        kinds = {name: kind for name, kind in changed}
+        assert kinds.get("_legacy_mcpm_clickup") == "legacy companion removed"
+    finally:
+        os.unlink(path)
+
+
+def test116_client_sync_safe_keeps_existing_companion(isolated_home, monkeypatch):
+    """The `--safe` path must not prune existing companions."""
+    from mcpm.commands.client import _plan_sync
+
+    config = GlobalConfigManager(
+        config_path=isolated_home / ".config" / "mcpm" / "servers.json",
+        metadata_path=isolated_home / ".config" / "mcpm" / "profiles_metadata.json",
+    )
+    config.add_server(RemoteServerConfig(name="clickup", url="https://mcp.clickup.com/mcp"))
+    monkeypatch.setattr("mcpm.commands.client.global_config_manager", config)
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f.write(json.dumps({
+            "mcpServers": {
+                "mcpm_clickup": {"command": "mcpm", "args": ["run", "clickup"]},
+                "_legacy_mcpm_clickup": {"command": "mcpm", "args": ["run", "clickup"]},
+            }
+        }).encode("utf-8"))
+        path = f.name
+    try:
+        manager = _FakeClient(config_path_override=path)
+        _, after, _ = _plan_sync(
+            manager, "Fake", force_legacy=False, keep_legacy=True
+        )
+        assert "_legacy_mcpm_clickup" in after
+    finally:
+        os.unlink(path)
+
+
+def test117_client_sync_does_not_prune_unrelated_companions(isolated_home, monkeypatch):
+    """An orphan _legacy_<X> with no matching primary entry stays put."""
+    from mcpm.commands.client import _plan_sync
+
+    config = GlobalConfigManager(
+        config_path=isolated_home / ".config" / "mcpm" / "servers.json",
+        metadata_path=isolated_home / ".config" / "mcpm" / "profiles_metadata.json",
+    )
+    monkeypatch.setattr("mcpm.commands.client.global_config_manager", config)
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        # No primary entry, just a stray companion.
+        f.write(json.dumps({
+            "mcpServers": {
+                "_legacy_mcpm_dead": {"command": "mcpm", "args": ["run", "dead"]},
+            }
+        }).encode("utf-8"))
+        path = f.name
+    try:
+        manager = _FakeClient(config_path_override=path)
+        _, after, changed = _plan_sync(
+            manager, "Fake", force_legacy=False, keep_legacy=False
+        )
+        assert "_legacy_mcpm_dead" in after
+        assert changed == []
+    finally:
+        os.unlink(path)
+
+
 def test120_client_sync_safe_writes_legacy_companion(isolated_home, monkeypatch):
     """--safe keeps a `_legacy_<name>` entry alongside the new shape."""
     from mcpm.commands.client import _plan_sync

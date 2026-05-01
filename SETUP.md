@@ -265,6 +265,17 @@ mcpm client sync           # OR: re-emit all clients in one go
 mcpm sync push             # share with other machines
 ```
 
+### When you uninstall a server
+
+```bash
+mcpm uninstall <name>            # also strips matching mcpm_<name> entries from every installed client
+mcpm uninstall <name> --no-clients   # keep client configs untouched (manual cleanup later)
+```
+
+A regular `mcpm uninstall` is the inverse of `mcpm install`: registry removal AND client config cleanup happen together so clients don't try to spawn a server that no longer exists.
+
+If you skipped propagation (`--no-clients`), or imported configs from elsewhere, run `mcpm client sync` to prune dangling `mcpm_<name>` entries (it does this by default; pass `--keep-orphans` to preserve them).
+
 ### When OAuth on an HTTP server stops prompting in `/mcp`
 
 That usually means the entry got reverted to `mcpm run X` somewhere. Verify and re-migrate:

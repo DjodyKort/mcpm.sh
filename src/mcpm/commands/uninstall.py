@@ -41,18 +41,27 @@ def global_remove_server(server_name: str) -> bool:
 @click.command()
 @click.argument("server_name")
 @click.option("--force", "-f", is_flag=True, help="Force removal without confirmation")
+@click.option(
+    "--no-clients",
+    is_flag=True,
+    help="Skip client config cleanup. Stale `mcpm_<name>` entries will remain "
+    "until you run `mcpm client sync` (or remove them manually).",
+)
 @click.help_option("-h", "--help")
-def uninstall(server_name, force):
+def uninstall(server_name, force, no_clients):
     """Remove an installed MCP server from global configuration.
 
-    Removes servers from the global MCPM configuration and clears
-    any profile tags associated with the server.
+    Removes the server from the global MCPM configuration, clears any profile
+    tags, and (by default) prunes matching `mcpm_<name>` entries from every
+    installed client config so the client doesn't try to spawn a server that
+    no longer exists.
 
     Examples:
 
     \b
         mcpm uninstall filesystem
         mcpm uninstall filesystem --force
+        mcpm uninstall filesystem --no-clients   # leave client configs untouched
     """
     # Get server from global configuration
     server_info = global_get_server(server_name)
@@ -88,5 +97,32 @@ def uninstall(server_name, force):
             logger.debug(f"Failed to clean up source metadata for '{server_name}': {e}")
         console.print(f"[green]Successfully removed server:[/ ] {server_name}")
         console.print("[dim]Note: Server has been removed from global config. Profile tags are also cleared.[/]")
+
+        # Propagate removal to installed clients so they don't keep stale
+        # `mcpm_<name>` (or `_legacy_*`) entries pointing at a server that
+        # no longer exists.
+        if not no_clients:
+            try:
+                from mcpm.commands.client import _remove_server_from_clients
+
+                results = _remove_server_from_clients(server_name)
+            except Exception as exc:
+                logger.debug(f"Client config propagation failed for '{server_name}': {exc}")
+                console.print(
+                    f"[yellow]Could not propagate removal to client configs: {exc}.[/] "
+                    "Run [cyan]mcpm client sync[/] manually to clean up."
+                )
+                return
+
+            if results:
+                total = sum(len(removed) for _, _, removed in results)
+                console.print(
+                    f"[dim]Cleaned {total} entr"
+                    f"{'y' if total == 1 else 'ies'} from "
+                    f"{len(results)} client(s):[/]"
+                )
+                for _, display, removed in results:
+                    console.print(f"  [dim]•[/] {display}: {', '.join(removed)}")
+                console.print("[dim]Restart your MCP clients for the changes to take effect.[/]")
     else:
         console.print(f"[bold red]Error:[/ ] Failed to remove server '{server_name}'.")

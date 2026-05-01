@@ -429,6 +429,239 @@ def test116_client_sync_safe_keeps_existing_companion(isolated_home, monkeypatch
         os.unlink(path)
 
 
+def test118_client_sync_prunes_orphaned_entries_by_default(isolated_home, monkeypatch):
+    """An entry whose server is no longer registered gets removed."""
+    from mcpm.commands.client import _plan_sync
+
+    # Empty registry on purpose -- "ghost" entry is orphaned.
+    config = GlobalConfigManager(
+        config_path=isolated_home / ".config" / "mcpm" / "servers.json",
+        metadata_path=isolated_home / ".config" / "mcpm" / "profiles_metadata.json",
+    )
+    monkeypatch.setattr("mcpm.commands.client.global_config_manager", config)
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f.write(json.dumps({
+            "mcpServers": {
+                "mcpm_ghost": {"command": "mcpm", "args": ["run", "ghost"]},
+                "mcpm_alive": {"command": "node", "args": ["server.js"]},  # not mcpm-managed
+            }
+        }).encode("utf-8"))
+        path = f.name
+    try:
+        manager = _FakeClient(config_path_override=path)
+        _, after, changed = _plan_sync(
+            manager, "Fake", force_legacy=False, keep_legacy=False
+        )
+        assert "mcpm_ghost" not in after
+        assert "mcpm_alive" in after  # untouched
+        kinds = dict(changed)
+        assert kinds.get("mcpm_ghost") == "orphan removed"
+    finally:
+        os.unlink(path)
+
+
+def test119_client_sync_keep_orphans_preserves_stale_entries(isolated_home, monkeypatch):
+    """--keep-orphans preserves entries pointing at unregistered servers."""
+    from mcpm.commands.client import _plan_sync
+
+    config = GlobalConfigManager(
+        config_path=isolated_home / ".config" / "mcpm" / "servers.json",
+        metadata_path=isolated_home / ".config" / "mcpm" / "profiles_metadata.json",
+    )
+    monkeypatch.setattr("mcpm.commands.client.global_config_manager", config)
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f.write(json.dumps({
+            "mcpServers": {"mcpm_ghost": {"command": "mcpm", "args": ["run", "ghost"]}}
+        }).encode("utf-8"))
+        path = f.name
+    try:
+        manager = _FakeClient(config_path_override=path)
+        _, after, changed = _plan_sync(
+            manager, "Fake", force_legacy=False, keep_legacy=False, prune_orphans=False
+        )
+        assert "mcpm_ghost" in after
+        assert changed == []
+    finally:
+        os.unlink(path)
+
+
+def test120_client_sync_prunes_legacy_companion_when_primary_orphaned(isolated_home, monkeypatch):
+    """Both `mcpm_ghost` and its `_legacy_mcpm_ghost` go when registry has neither."""
+    from mcpm.commands.client import _plan_sync
+
+    config = GlobalConfigManager(
+        config_path=isolated_home / ".config" / "mcpm" / "servers.json",
+        metadata_path=isolated_home / ".config" / "mcpm" / "profiles_metadata.json",
+    )
+    monkeypatch.setattr("mcpm.commands.client.global_config_manager", config)
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f.write(json.dumps({
+            "mcpServers": {
+                "mcpm_ghost": {"command": "mcpm", "args": ["run", "ghost"]},
+                "_legacy_mcpm_ghost": {"command": "mcpm", "args": ["run", "ghost"]},
+            }
+        }).encode("utf-8"))
+        path = f.name
+    try:
+        manager = _FakeClient(config_path_override=path)
+        _, after, _ = _plan_sync(
+            manager, "Fake", force_legacy=False, keep_legacy=False
+        )
+        assert "mcpm_ghost" not in after
+        assert "_legacy_mcpm_ghost" not in after
+    finally:
+        os.unlink(path)
+
+
+def test121_remove_server_from_clients_focused_helper(isolated_home, monkeypatch):
+    """The focused helper removes only the requested server's entries."""
+    from mcpm.commands import client as client_module
+
+    # Build a fake registry of installed clients with one having the entry.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f.write(json.dumps({
+            "mcpServers": {
+                "mcpm_doomed": {"command": "mcpm", "args": ["run", "doomed"]},
+                "_legacy_mcpm_doomed": {"command": "mcpm", "args": ["run", "doomed"]},
+                "mcpm_alive": {"command": "mcpm", "args": ["run", "alive"]},
+            }
+        }).encode("utf-8"))
+        path = f.name
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    fake_manager = _FakeClient(config_path_override=path)
+
+    monkeypatch.setattr(
+        "mcpm.commands.client.ClientRegistry.detect_installed_clients",
+        staticmethod(lambda: {"fake": True}),
+    )
+    monkeypatch.setattr(
+        "mcpm.commands.client.ClientRegistry.get_client_manager",
+        staticmethod(lambda key: fake_manager),
+    )
+    monkeypatch.setattr(
+        "mcpm.commands.client.ClientRegistry.get_client_info",
+        staticmethod(lambda key: {"name": "Fake"}),
+    )
+
+    try:
+        results = client_module._remove_server_from_clients("doomed")
+        assert len(results) == 1
+        client_key, display, removed = results[0]
+        assert client_key == "fake"
+        assert set(removed) == {"mcpm_doomed", "_legacy_mcpm_doomed"}
+
+        # Verify on disk: doomed gone, alive untouched.
+        on_disk = json.loads(Path(path).read_text())
+        servers = on_disk["mcpServers"]
+        assert "mcpm_doomed" not in servers
+        assert "_legacy_mcpm_doomed" not in servers
+        assert "mcpm_alive" in servers
+    finally:
+        os.unlink(path)
+
+
+def test122_remove_server_from_clients_dry_run_does_not_write(isolated_home, monkeypatch):
+    from mcpm.commands import client as client_module
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f.write(json.dumps({
+            "mcpServers": {"mcpm_doomed": {"command": "mcpm", "args": ["run", "doomed"]}}
+        }).encode("utf-8"))
+        path = f.name
+
+    from mcpm.clients.base import JSONClientManager
+
+    class _FakeClient(JSONClientManager):
+        client_key = "fake"
+        display_name = "Fake"
+        download_url = ""
+
+        def get_client_info(self):
+            return {"name": self.display_name, "config_file": self.config_path}
+
+        def is_client_installed(self) -> bool:
+            return True
+
+    fake_manager = _FakeClient(config_path_override=path)
+
+    monkeypatch.setattr(
+        "mcpm.commands.client.ClientRegistry.detect_installed_clients",
+        staticmethod(lambda: {"fake": True}),
+    )
+    monkeypatch.setattr(
+        "mcpm.commands.client.ClientRegistry.get_client_manager",
+        staticmethod(lambda key: fake_manager),
+    )
+    monkeypatch.setattr(
+        "mcpm.commands.client.ClientRegistry.get_client_info",
+        staticmethod(lambda key: {"name": "Fake"}),
+    )
+
+    try:
+        results = client_module._remove_server_from_clients("doomed", dry_run=True)
+        assert len(results) == 1
+        # File still has the entry.
+        on_disk = json.loads(Path(path).read_text())
+        assert "mcpm_doomed" in on_disk["mcpServers"]
+    finally:
+        os.unlink(path)
+
+
 def test117_client_sync_does_not_prune_unrelated_companions(isolated_home, monkeypatch):
     """An orphan _legacy_<X> with no matching primary entry stays put."""
     from mcpm.commands.client import _plan_sync

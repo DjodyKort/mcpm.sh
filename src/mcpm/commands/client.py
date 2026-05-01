@@ -1365,7 +1365,12 @@ _LEGACY_PREFIX = "_legacy_"
 @click.option("--legacy", "force_legacy", is_flag=True, help="Force every entry back to `mcpm run X`.")
 @click.option("--client", "client_filter", help="Only sync the named client (e.g. cursor).")
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing.")
-def sync_clients(safe: bool, force_legacy: bool, client_filter: str, dry_run: bool):
+@click.option(
+    "--keep-orphans/--prune-orphans",
+    default=False,
+    help="Keep client entries whose server was uninstalled (default: prune).",
+)
+def sync_clients(safe: bool, force_legacy: bool, client_filter: str, dry_run: bool, keep_orphans: bool):
     """Rewrite every mcpm-managed entry across installed clients.
 
     Reads each server's current proxy_mode from servers.json and re-emits
@@ -1373,6 +1378,11 @@ def sync_clients(safe: bool, force_legacy: bool, client_filter: str, dry_run: bo
     (overwrites the old shape). Use --safe to keep a `_legacy_` companion
     so you can roll back. Use --legacy to revert everything to the
     pre-router shape.
+
+    Orphan entries (mcpm_<name> entries whose server is no longer in
+    servers.json) are pruned by default. Pass --keep-orphans to leave
+    them in place; useful if you're temporarily reinstalling a server
+    and want the client config to "remember" that it was enabled here.
     """
     if safe and force_legacy:
         console.print("[red]--safe and --legacy are mutually exclusive.[/]")
@@ -1409,6 +1419,7 @@ def sync_clients(safe: bool, force_legacy: bool, client_filter: str, dry_run: bo
             display,
             force_legacy=force_legacy,
             keep_legacy=safe,
+            prune_orphans=not keep_orphans,
         )
         if not changed:
             console.print(f"[dim]{display}: nothing to do.[/]")
@@ -1453,13 +1464,28 @@ def sync_clients(safe: bool, force_legacy: bool, client_filter: str, dry_run: bo
         console.print("[dim]No changes needed.[/]")
 
 
-def _plan_sync(client_manager, display_name: str, *, force_legacy: bool, keep_legacy: bool):
-    """Return (before, after, changed) for one client.
+def _plan_sync(
+    client_manager,
+    display_name: str,
+    *,
+    force_legacy: bool,
+    keep_legacy: bool,
+    prune_orphans: bool = True,
+):
+    """Reconcile one client's mcpm-managed entries with current registry state.
 
     `before` and `after` are the full {server_name: client_config_dict} maps.
-    `changed` is a list of (server_name, kind) tuples for the user log,
-    where kind is one of: "rewritten", "added new (kept legacy)",
-    "forced legacy", "no-op".
+    `changed` is a list of (entry_name, kind) tuples for the user log,
+    where kind is one of:
+      - "rewritten":              proxy_mode produces a different shape than what's stored
+      - "added new (kept legacy)": --safe wrote new entry + kept _legacy_ companion
+      - "forced legacy":           --legacy revert
+      - "orphan removed":          server is no longer in servers.json
+      - "legacy companion removed": _legacy_<X> pruned because its primary was rewritten
+
+    A registered entry whose new shape equals the current one is left alone
+    (silent no-op). `prune_orphans=False` keeps entries that point at
+    uninstalled servers; useful when you plan to reinstall.
     """
 
     raw_servers = client_manager.get_servers()
@@ -1467,6 +1493,7 @@ def _plan_sync(client_manager, display_name: str, *, force_legacy: bool, keep_le
     after: dict = dict(before)
     changed: list[tuple[str, str]] = []
     primary_entries_touched: set[str] = set()
+    orphaned_entries: set[str] = set()
 
     for entry_name, entry in list(before.items()):
         # Legacy companions are handled in a second pass so we know which
@@ -1486,6 +1513,12 @@ def _plan_sync(client_manager, display_name: str, *, force_legacy: bool, keep_le
 
         registered = global_config_manager.get_server(original_server_name)
         if registered is None:
+            # The server was uninstalled but the client still has a stale
+            # entry pointing at it. Prune unless the caller opted out.
+            if prune_orphans:
+                del after[entry_name]
+                orphaned_entries.add(entry_name)
+                changed.append((entry_name, "orphan removed"))
             continue
 
         if force_legacy:
@@ -1514,18 +1547,76 @@ def _plan_sync(client_manager, display_name: str, *, force_legacy: bool, keep_le
         changed.append((entry_name, kind))
 
     # Second pass: prune `_legacy_<X>` companions when their primary entry
-    # was just rewritten without --safe. This is the cleanup the user
-    # otherwise has to do by hand after a successful test run.
+    # was just rewritten without --safe, OR when their primary was just
+    # pruned as an orphan (otherwise we'd leave a stale companion behind).
     if not keep_legacy:
         for entry_name in list(after.keys()):
             if not entry_name.startswith(_LEGACY_PREFIX):
                 continue
             primary = entry_name[len(_LEGACY_PREFIX):]
-            if primary in primary_entries_touched:
+            if primary in primary_entries_touched or primary in orphaned_entries:
                 del after[entry_name]
                 changed.append((entry_name, "legacy companion removed"))
 
     return before, after, changed
+
+
+def _remove_server_from_clients(server_name: str, *, dry_run: bool = False):
+    """Strip every mcpm-managed entry for `server_name` from every installed client.
+
+    Focused dual of _plan_sync: only touches entries that reference this one
+    server (and their _legacy_ companions), leaving everything else alone.
+    Returns a list of (client_key, display_name, removed_entry_names) so the
+    caller can report cleanly.
+
+    Used by `mcpm uninstall` to keep client configs in sync with the registry
+    without invasively rewriting unrelated entries.
+    """
+    results: list[tuple[str, str, list[str]]] = []
+    installed = ClientRegistry.detect_installed_clients()
+    for client_key, ok in sorted(installed.items()):
+        if not ok:
+            continue
+        manager = ClientRegistry.get_client_manager(client_key)
+        if manager is None:
+            continue
+        info = ClientRegistry.get_client_info(client_key)
+        display = info.get("name", client_key)
+
+        raw_servers = manager.get_servers()
+        before = {name: dict(cfg) if isinstance(cfg, dict) else cfg for name, cfg in raw_servers.items()}
+        removed: list[str] = []
+        for entry_name, entry in before.items():
+            cmd = entry.get("command") if isinstance(entry, dict) else getattr(entry, "command", None)
+            args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
+            if cmd != "mcpm" or not args or args[0] not in ("run", "bridge"):
+                continue
+            referenced = args[1] if len(args) > 1 else None
+            if referenced == server_name:
+                removed.append(entry_name)
+
+        # Also catch matching _legacy_<X> companions whose primary refers
+        # to this server.
+        for entry_name in list(before.keys()):
+            if not entry_name.startswith(_LEGACY_PREFIX):
+                continue
+            entry = before[entry_name]
+            args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
+            if len(args) >= 2 and args[0] in ("run", "bridge") and args[1] == server_name:
+                if entry_name not in removed:
+                    removed.append(entry_name)
+
+        if not removed:
+            continue
+
+        results.append((client_key, display, removed))
+        if dry_run:
+            continue
+
+        after = {k: v for k, v in before.items() if k not in removed}
+        _apply_sync(manager, before, after)
+
+    return results
 
 
 def _apply_sync(client_manager, before: dict, after: dict) -> None:

@@ -65,25 +65,36 @@ def sync_skills(client, dry_run, path, global_mode, migrate):
     # repo returned by find_skills_repo. If the user didn't point at that
     # path explicitly (no --path) AND their cwd isn't inside it, then
     # find_skills_repo resolved via the git-sync fallback and the output
-    # would never reach any installed client -- it would land inside an
-    # unrelated centralised repo. Refuse instead of silently producing
-    # dead files.
+    # would never reach any installed client.
+    #
+    # When that fallback path is the canonical mcpm sync repo, the user is
+    # almost certainly running `mcpm skills sync` from $HOME and meant
+    # global mode -- auto-promote instead of erroring out. The hard error
+    # remains for cases where some unrelated repo got picked up.
     if not global_mode and not path:
         repo_resolved = repo_path.resolve()
         cwd_resolved = Path.cwd().resolve()
         cwd_inside_repo = cwd_resolved == repo_resolved or repo_resolved in cwd_resolved.parents
         if not cwd_inside_repo:
-            console.print(
-                "[red]Error: project-mode sync would write into "
-                f"[yellow]{repo_path}[/] (auto-detected skills repo), but cwd is "
-                "not inside it -- no client will read from there.[/]"
-            )
-            console.print(
-                "Use [cyan]--global[/] to sync to user-level paths (e.g. "
-                "~/.claude/skills/), pass [cyan]--path[/] to opt in to a specific "
-                "project root explicitly, or cd into the skills repo first."
-            )
-            return
+            if _is_canonical_sync_repo(repo_resolved):
+                console.print(
+                    "[dim]Detected canonical skills repo at "
+                    f"{repo_path}; cwd is outside it -- promoting to "
+                    "[cyan]--global[/] mode.[/]"
+                )
+                global_mode = True
+            else:
+                console.print(
+                    "[red]Error: project-mode sync would write into "
+                    f"[yellow]{repo_path}[/] (auto-detected skills repo), but cwd is "
+                    "not inside it -- no client will read from there.[/]"
+                )
+                console.print(
+                    "Use [cyan]--global[/] to sync to user-level paths (e.g. "
+                    "~/.claude/skills/), pass [cyan]--path[/] to opt in to a specific "
+                    "project root explicitly, or cd into the skills repo first."
+                )
+                return
 
     # Determine target clients
     client_keys = [client] if client else None
@@ -175,3 +186,28 @@ def sync_skills(client, dry_run, path, global_mode, migrate):
                 "Run [bold]mcpm skills resolve[/] to handle them, "
                 "or re-run with [bold]--migrate[/] to auto-replace."
             )
+
+
+def _is_canonical_sync_repo(repo_path: Path) -> bool:
+    """Return True if `repo_path` matches the cross-machine sync clone path.
+
+    Reads the same `skills_sync.json` config that `find_skills_repo` uses as
+    a fallback, so the auto-promotion to --global only fires for that one
+    well-known location -- never for an unrelated project that happened to
+    live above cwd.
+    """
+    try:
+        import json
+
+        from mcpm.utils.platform import get_config_directory
+
+        config_path = get_config_directory() / "skills_sync.json"
+        if not config_path.exists():
+            return False
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        canonical = data.get("local_path")
+        if not canonical:
+            return False
+        return Path(canonical).resolve() == repo_path
+    except Exception:
+        return False

@@ -41,6 +41,12 @@ dependencies = [
     "starlette>=0.40.0",
     "uvicorn[standard]>=0.30.0",
     "httpx>=0.27.0",
+    # Pinned: authlib 1.7.0 added a module-level DeprecationWarning that fires
+    # on every import of `authlib.jose`, which fastmcp 2.13.0 imports at
+    # startup. Until fastmcp migrates to joserfc upstream, hold the version
+    # at 1.6.x so CLI output stays clean. Drop this pin once fastmcp's
+    # jwt.py uses joserfc (track: https://github.com/jlowin/fastmcp).
+    "authlib>=1.6,<1.7",
 ]
 
 [project.urls]

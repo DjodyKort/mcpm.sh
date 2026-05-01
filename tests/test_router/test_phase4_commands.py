@@ -456,8 +456,13 @@ def test118_client_sync_prunes_orphaned_entries_by_default(isolated_home, monkey
     with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
         f.write(json.dumps({
             "mcpServers": {
+                # Three entries, two outcomes:
+                #  - mcpm_ghost (legacy shape, no registry entry): orphan, prune
+                #  - mcpm_zombie (already-migrated direct-HTTP shape, no registry): orphan, prune
+                #  - handwritten_node (user's own non-mcpm key): untouched
                 "mcpm_ghost": {"command": "mcpm", "args": ["run", "ghost"]},
-                "mcpm_alive": {"command": "node", "args": ["server.js"]},  # not mcpm-managed
+                "mcpm_zombie": {"type": "http", "url": "https://gone.example/mcp"},
+                "handwritten_node": {"command": "node", "args": ["server.js"]},
             }
         }).encode("utf-8"))
         path = f.name
@@ -467,9 +472,11 @@ def test118_client_sync_prunes_orphaned_entries_by_default(isolated_home, monkey
             manager, "Fake", force_legacy=False, keep_legacy=False
         )
         assert "mcpm_ghost" not in after
-        assert "mcpm_alive" in after  # untouched
+        assert "mcpm_zombie" not in after
+        assert "handwritten_node" in after  # outside our mcpm_* namespace
         kinds = dict(changed)
         assert kinds.get("mcpm_ghost") == "orphan removed"
+        assert kinds.get("mcpm_zombie") == "orphan removed"
     finally:
         os.unlink(path)
 

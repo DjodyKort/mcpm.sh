@@ -1358,6 +1358,39 @@ def _edit_client_non_interactive(
 
 
 _LEGACY_PREFIX = "_legacy_"
+_MCPM_PREFIX = "mcpm_"
+_PROFILE_PREFIX = "mcpm_profile_"
+
+
+def _server_name_for_entry(entry_name: str, entry):
+    """Return the registered server name an mcpm-managed client entry refers to.
+
+    Returns None for entries that are not mcpm-managed (handwritten servers
+    the user added themselves) or for profile entries (handled separately).
+
+    The detection prefers explicit shape signals when present
+    (`{"command": "mcpm", "args": ["run"|"bridge", X]}`) and falls back to
+    the `mcpm_<X>` key convention so we still recognise entries that were
+    rewritten to `{"type": "http", ...}` or another non-mcpm-command shape
+    by an earlier `client sync`.
+    """
+    # Profile entries -- skip; they're not server registrations.
+    if entry_name.startswith(_PROFILE_PREFIX):
+        return None
+
+    # Shape-based detection first (handles entries whose key drift from the
+    # `mcpm_<X>` convention -- e.g. someone manually renamed but kept the
+    # `command: mcpm, args: [run, X]` body).
+    cmd = entry.get("command") if isinstance(entry, dict) else getattr(entry, "command", None)
+    args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
+    if cmd == "mcpm" and args and args[0] in ("run", "bridge") and len(args) > 1:
+        return args[1]
+
+    # Key-based fallback for already-migrated entries (direct HTTP, etc.).
+    if entry_name.startswith(_MCPM_PREFIX):
+        return entry_name[len(_MCPM_PREFIX):]
+
+    return None
 
 
 @client.command(name="sync", context_settings=dict(help_option_names=["-h", "--help"]))
@@ -1501,14 +1534,12 @@ def _plan_sync(
         if entry_name.startswith(_LEGACY_PREFIX):
             continue
 
-        cmd = entry.get("command") if isinstance(entry, dict) else getattr(entry, "command", None)
-        args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
-        if cmd != "mcpm":
-            continue
-        if not args or args[0] not in ("run", "bridge"):
-            continue
-        original_server_name = args[1] if len(args) > 1 else None
-        if not original_server_name:
+        # Identify the registered server name behind this entry. The signal
+        # is the key prefix (`mcpm_<X>`), not the entry shape -- that way a
+        # direct-HTTP `{type: http, url: ...}` entry under `mcpm_<X>` is
+        # still recognised as mcpm-managed when its server is uninstalled.
+        original_server_name = _server_name_for_entry(entry_name, entry)
+        if original_server_name is None:
             continue
 
         registered = global_config_manager.get_server(original_server_name)
@@ -1587,22 +1618,26 @@ def _remove_server_from_clients(server_name: str, *, dry_run: bool = False):
         before = {name: dict(cfg) if isinstance(cfg, dict) else cfg for name, cfg in raw_servers.items()}
         removed: list[str] = []
         for entry_name, entry in before.items():
-            cmd = entry.get("command") if isinstance(entry, dict) else getattr(entry, "command", None)
-            args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
-            if cmd != "mcpm" or not args or args[0] not in ("run", "bridge"):
+            if entry_name.startswith(_LEGACY_PREFIX):
                 continue
-            referenced = args[1] if len(args) > 1 else None
+            referenced = _server_name_for_entry(entry_name, entry)
             if referenced == server_name:
                 removed.append(entry_name)
 
         # Also catch matching _legacy_<X> companions whose primary refers
-        # to this server.
-        for entry_name in list(before.keys()):
+        # to this server. The companion is always in mcpm-run shape, so
+        # shape-based detection is reliable here.
+        for entry_name, entry in before.items():
             if not entry_name.startswith(_LEGACY_PREFIX):
                 continue
-            entry = before[entry_name]
             args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
             if len(args) >= 2 and args[0] in ("run", "bridge") and args[1] == server_name:
+                if entry_name not in removed:
+                    removed.append(entry_name)
+                continue
+            # Fallback: companion key follows `_legacy_mcpm_<X>` convention.
+            primary = entry_name[len(_LEGACY_PREFIX):]
+            if primary.startswith(_MCPM_PREFIX) and primary[len(_MCPM_PREFIX):] == server_name:
                 if entry_name not in removed:
                     removed.append(entry_name)
 

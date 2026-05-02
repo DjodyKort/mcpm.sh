@@ -407,21 +407,37 @@ def test_client_edit_command_open_editor(monkeypatch, tmp_path):
 
 def test_client_edit_non_interactive_add_server(monkeypatch):
     """Test adding servers to a client non-interactively."""
-    # Mock client manager
+    # Mock client manager. The non-interactive path now goes through
+    # `_enable_managed_server`, which writes via `_load_config` + `_save_config`
+    # so the resolver gets to pick the right shape (legacy / direct / router).
+    saved_configs = []
+
     mock_client_manager = Mock()
     mock_client_manager.is_client_installed = Mock(return_value=True)
     mock_client_manager.config_path = "/path/to/config.json"
+    mock_client_manager.configure_key_name = "mcpServers"
     mock_client_manager.get_servers.return_value = {}
     mock_client_manager.update_servers.return_value = None
-    mock_client_manager.add_server.return_value = None
+    mock_client_manager._load_config = Mock(return_value={"mcpServers": {}})
+    mock_client_manager._save_config = Mock(side_effect=lambda c: (saved_configs.append(c), True)[1])
+
+    # Real STDIOServerConfig so to_client_format runs through the resolver.
+    from mcpm.core.schema import STDIOServerConfig
+    real_server = STDIOServerConfig(name="test-server", command="echo", args=["hi"])
+
+    # to_client_format from JSONClientManager (the real implementation)
+    from mcpm.clients.base import JSONClientManager
+    mock_client_manager.to_client_format = Mock(side_effect=lambda s: JSONClientManager.to_client_format(mock_client_manager, s))
+    mock_client_manager._resolve_proxy_mode = Mock(side_effect=lambda s: JSONClientManager._resolve_proxy_mode(mock_client_manager, s))
+    mock_client_manager.supports_http_mcp = True
 
     monkeypatch.setattr("mcpm.commands.client.ClientRegistry.get_client_manager", Mock(return_value=mock_client_manager))
     monkeypatch.setattr("mcpm.commands.client.ClientRegistry.get_client_info", Mock(return_value={"name": "Cursor"}))
 
-    # Mock GlobalConfigManager
+    # Mock GlobalConfigManager so the resolver can find the registered server.
     mock_global_config = Mock()
-    mock_global_config.list_servers.return_value = {"test-server": Mock(description="Test server")}
-    mock_global_config.get_server.return_value = Mock(name="test-server")
+    mock_global_config.list_servers.return_value = {"test-server": real_server}
+    mock_global_config.get_server.return_value = real_server
     monkeypatch.setattr("mcpm.commands.client.global_config_manager", mock_global_config)
 
     # Force non-interactive mode
@@ -430,21 +446,21 @@ def test_client_edit_non_interactive_add_server(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(edit_client, [
         "cursor",
-        "--add-server", "test-server"  # Only add test-server which exists
+        "--add-server", "test-server"
     ])
 
     assert result.exit_code == 0
     assert "Successfully updated" in result.output
 
-    # Verify that add_server was called with the prefixed server name
-    mock_client_manager.add_server.assert_called()
-    # Check that add_server was called with a server config for the prefixed server name
-    call_args = mock_client_manager.add_server.call_args
-    assert call_args is not None
-    server_config = call_args[0][0]  # First positional argument
-    assert server_config.name == "mcpm_test-server"
-    assert server_config.command == "mcpm"
-    assert server_config.args == ["run", "test-server"]
+    # Verify the prefixed entry made it into the saved config.
+    assert saved_configs, "expected _save_config to be called"
+    final_servers = saved_configs[-1]["mcpServers"]
+    assert "mcpm_test-server" in final_servers
+    # In Phase 1, stdio in auto mode resolves to the legacy mcpm-run shape.
+    assert final_servers["mcpm_test-server"] == {
+        "command": "mcpm",
+        "args": ["run", "test-server"],
+    }
 
 
 def test_client_edit_non_interactive_remove_server(monkeypatch):
@@ -488,33 +504,36 @@ def test_client_edit_non_interactive_remove_server(monkeypatch):
 
 def test_client_edit_non_interactive_set_servers(monkeypatch):
     """Test setting all servers for a client non-interactively."""
-    # Mock client manager
+    saved_configs = []
+
     mock_client_manager = Mock()
     mock_client_manager.is_client_installed = Mock(return_value=True)
     mock_client_manager.config_path = "/path/to/config.json"
+    mock_client_manager.configure_key_name = "mcpServers"
     # Return a proper MCPM server configuration that will be recognized
     mock_client_manager.get_servers.return_value = {
-        "mcpm_old-server": {
-            "command": "mcpm",
-            "args": ["run", "old-server"]
-        }
+        "mcpm_old-server": {"command": "mcpm", "args": ["run", "old-server"]}
     }
-    mock_client_manager.add_server.return_value = None
     mock_client_manager.remove_server.return_value = None
+    mock_client_manager._load_config = Mock(return_value={"mcpServers": {}})
+    mock_client_manager._save_config = Mock(side_effect=lambda c: (saved_configs.append(c), True)[1])
+
+    from mcpm.core.schema import STDIOServerConfig
+    real_server1 = STDIOServerConfig(name="server1", command="echo", args=["s1"])
+    real_server2 = STDIOServerConfig(name="server2", command="echo", args=["s2"])
+    from mcpm.clients.base import JSONClientManager
+    mock_client_manager.to_client_format = Mock(side_effect=lambda s: JSONClientManager.to_client_format(mock_client_manager, s))
+    mock_client_manager._resolve_proxy_mode = Mock(side_effect=lambda s: JSONClientManager._resolve_proxy_mode(mock_client_manager, s))
+    mock_client_manager.supports_http_mcp = True
 
     monkeypatch.setattr("mcpm.commands.client.ClientRegistry.get_client_manager", Mock(return_value=mock_client_manager))
     monkeypatch.setattr("mcpm.commands.client.ClientRegistry.get_client_info", Mock(return_value={"name": "Cursor"}))
 
-    # Mock GlobalConfigManager
     mock_global_config = Mock()
-    mock_global_config.list_servers.return_value = {
-        "server1": Mock(description="Server 1"),
-        "server2": Mock(description="Server 2")
-    }
-    mock_global_config.get_server.return_value = Mock()
+    mock_global_config.list_servers.return_value = {"server1": real_server1, "server2": real_server2}
+    mock_global_config.get_server.side_effect = lambda n: {"server1": real_server1, "server2": real_server2}.get(n)
     monkeypatch.setattr("mcpm.commands.client.global_config_manager", mock_global_config)
 
-    # Force non-interactive mode
     monkeypatch.setattr("mcpm.commands.client.is_non_interactive", lambda: True)
 
     runner = CliRunner()
@@ -525,9 +544,13 @@ def test_client_edit_non_interactive_set_servers(monkeypatch):
 
     assert result.exit_code == 0
     assert "Successfully updated" in result.output
-    # Verify that add_server was called for the new servers
-    assert mock_client_manager.add_server.call_count == 2
-    # Verify that remove_server was called for the old server
+    # _save_config gets called once per added server.
+    assert len(saved_configs) == 2
+    # The final saved state has both new entries.
+    final = saved_configs[-1]["mcpServers"]
+    assert "mcpm_server1" in final
+    assert "mcpm_server2" in final
+    # Old server was removed via remove_server.
     mock_client_manager.remove_server.assert_called_with("mcpm_old-server")
 
 
@@ -600,20 +623,29 @@ def test_client_edit_non_interactive_server_not_found(monkeypatch):
 
 def test_client_edit_with_force_flag(monkeypatch):
     """Test client edit with --force flag."""
-    # Mock client manager
+    saved_configs = []
+
     mock_client_manager = Mock()
     mock_client_manager.is_client_installed = Mock(return_value=True)
     mock_client_manager.config_path = "/path/to/config.json"
+    mock_client_manager.configure_key_name = "mcpServers"
     mock_client_manager.get_servers.return_value = {}
-    mock_client_manager.add_server.return_value = None
+    mock_client_manager._load_config = Mock(return_value={"mcpServers": {}})
+    mock_client_manager._save_config = Mock(side_effect=lambda c: (saved_configs.append(c), True)[1])
+
+    from mcpm.core.schema import STDIOServerConfig
+    real_server = STDIOServerConfig(name="test-server", command="echo")
+    from mcpm.clients.base import JSONClientManager
+    mock_client_manager.to_client_format = Mock(side_effect=lambda s: JSONClientManager.to_client_format(mock_client_manager, s))
+    mock_client_manager._resolve_proxy_mode = Mock(side_effect=lambda s: JSONClientManager._resolve_proxy_mode(mock_client_manager, s))
+    mock_client_manager.supports_http_mcp = True
 
     monkeypatch.setattr("mcpm.commands.client.ClientRegistry.get_client_manager", Mock(return_value=mock_client_manager))
     monkeypatch.setattr("mcpm.commands.client.ClientRegistry.get_client_info", Mock(return_value={"name": "Cursor"}))
 
-    # Mock GlobalConfigManager
     mock_global_config = Mock()
-    mock_global_config.list_servers.return_value = {"test-server": Mock(description="Test server")}
-    mock_global_config.get_server.return_value = Mock(name="test-server")
+    mock_global_config.list_servers.return_value = {"test-server": real_server}
+    mock_global_config.get_server.return_value = real_server
     monkeypatch.setattr("mcpm.commands.client.global_config_manager", mock_global_config)
 
     runner = CliRunner()
@@ -625,8 +657,8 @@ def test_client_edit_with_force_flag(monkeypatch):
 
     assert result.exit_code == 0
     assert "Successfully updated" in result.output
-    # Verify add_server was called for the new server
-    assert mock_client_manager.add_server.called
+    assert saved_configs, "expected _save_config to be called"
+    assert "mcpm_test-server" in saved_configs[-1]["mcpServers"]
 
 
 def test_client_edit_command_help():

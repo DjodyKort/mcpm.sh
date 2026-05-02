@@ -610,11 +610,10 @@ def _save_config_with_profiles_and_servers(
             server_config = STDIOServerConfig(name=prefixed_name, command="mcpm", args=["profile", "run", profile_name])
             client_manager.add_server(server_config)
 
-        # Add new MCPM server entries
+        # Add new MCPM server entries via the resolver so each entry's
+        # shape respects the server's current proxy_mode (direct/router/...).
         for server_name in selected_servers:
-            prefixed_name = f"mcpm_{server_name}"
-            server_config = STDIOServerConfig(name=prefixed_name, command="mcpm", args=["run", server_name])
-            client_manager.add_server(server_config)
+            _enable_managed_server(client_manager, server_name)
 
         console.print(f"[green]Successfully updated {client_name} configuration![/]")
         console.print(f"[dim]Config saved to: {config_path}[/]")
@@ -695,7 +694,6 @@ def _interactive_server_selection_inquirer(
 def _save_config_with_mcpm_servers(client_manager, config_path, current_config, mcpm_servers, client_name):
     """Save the client config with updated MCPM server entries using the client manager."""
     try:
-        from mcpm.core.schema import STDIOServerConfig
 
         # Get list of current servers
         current_server_list = client_manager.list_servers()
@@ -715,12 +713,9 @@ def _save_config_with_mcpm_servers(client_manager, config_path, current_config, 
         for server_name in servers_to_remove:
             client_manager.remove_server(server_name)
 
-        # Add new MCPM-managed entries with mcpm_ prefix
+        # Add new MCPM-managed entries via the resolver (proxy_mode aware).
         for server_name in mcpm_servers:
-            prefixed_name = f"mcpm_{server_name}"
-            # Create a proper ServerConfig object for MCPM server
-            server_config = STDIOServerConfig(name=prefixed_name, command="mcpm", args=["run", server_name])
-            client_manager.add_server(server_config)
+            _enable_managed_server(client_manager, server_name)
 
         console.print(f"[green]Successfully updated {client_name} configuration![/]")
         console.print(f"[dim]Config saved to: {config_path}[/]")
@@ -1117,7 +1112,6 @@ def _replace_client_config_with_profile(client_manager, profile_name, client_nam
 def _replace_client_config_with_mcpm(client_manager, selected_servers, client_name):
     """Replace client config servers with MCPM managed versions."""
     try:
-        from mcpm.core.schema import STDIOServerConfig
 
         # Remove original servers
         for server_name in selected_servers:
@@ -1126,11 +1120,9 @@ def _replace_client_config_with_mcpm(client_manager, selected_servers, client_na
             except Exception:
                 pass  # Server might not exist in client config
 
-        # Add MCPM managed versions
+        # Add MCPM-managed versions via the resolver (proxy_mode aware).
         for server_name in selected_servers:
-            prefixed_name = f"mcpm_{server_name}"
-            server_config = STDIOServerConfig(name=prefixed_name, command="mcpm", args=["run", server_name])
-            client_manager.add_server(server_config)
+            _enable_managed_server(client_manager, server_name)
 
         console.print(
             f"\n[green]Successfully replaced {len(selected_servers)} server(s) in {client_name} config with MCPM managed versions.[/]"
@@ -1327,16 +1319,10 @@ def _edit_client_non_interactive(
             except Exception:
                 pass  # Server might not exist
 
-        # Add new server configurations
+        # Add new server configurations via the resolver (proxy_mode aware).
         for server_name in final_servers - set(current_individual_servers):
             try:
-                prefixed_name = f"mcpm_{server_name}"
-                server_config = STDIOServerConfig(
-                    name=prefixed_name,
-                    command="mcpm",
-                    args=["run", server_name]
-                )
-                client_manager.add_server(server_config)
+                _enable_managed_server(client_manager, server_name)
             except Exception as e:
                 console.print(f"[red]Error adding server {server_name}: {e}[/]")
 
@@ -1360,6 +1346,72 @@ def _edit_client_non_interactive(
 _LEGACY_PREFIX = "_legacy_"
 _MCPM_PREFIX = "mcpm_"
 _PROFILE_PREFIX = "mcpm_profile_"
+
+
+def _enable_managed_server(client_manager, server_name: str) -> bool:
+    """Write an mcpm-managed entry for `server_name` under `mcpm_<server_name>`.
+
+    Body comes from `to_client_format(registered)` so the entry shape matches
+    the server's current `proxy_mode` (direct HTTP / router URL / mcpm bridge
+    / legacy mcpm-run). Falls back to legacy shape when the server is not in
+    the global registry, so a stale `client edit` selection still produces
+    a syntactically valid (if non-functional) entry.
+    """
+    prefixed_name = f"{_MCPM_PREFIX}{server_name}"
+    registered = global_config_manager.get_server(server_name)
+    if registered is None:
+        body = {"command": "mcpm", "args": ["run", server_name]}
+    else:
+        body = client_manager.to_client_format(registered)
+
+    config = client_manager._load_config()
+    section_key = getattr(client_manager, "configure_key_name", "mcpServers")
+    config.setdefault(section_key, {})[prefixed_name] = body
+    return client_manager._save_config(config)
+
+
+def _remove_profile_from_clients(profile_name: str, *, dry_run: bool = False):
+    """Strip every `mcpm_profile_<name>` entry from every installed client.
+
+    Symmetric with _remove_server_from_clients but for profile entries.
+    Recognises both the key convention (`mcpm_profile_<X>`) and the
+    `{"command": "mcpm", "args": ["profile", "run", X]}` shape so we
+    catch entries regardless of which path wrote them.
+    """
+    results: list[tuple[str, str, list[str]]] = []
+    installed = ClientRegistry.detect_installed_clients()
+    expected_key = f"{_PROFILE_PREFIX}{profile_name}"
+    for client_key, ok in sorted(installed.items()):
+        if not ok:
+            continue
+        manager = ClientRegistry.get_client_manager(client_key)
+        if manager is None:
+            continue
+        info = ClientRegistry.get_client_info(client_key)
+        display = info.get("name", client_key)
+
+        raw = manager.get_servers()
+        before = {n: dict(c) if isinstance(c, dict) else c for n, c in raw.items()}
+        removed: list[str] = []
+        for entry_name, entry in before.items():
+            if entry_name == expected_key:
+                removed.append(entry_name)
+                continue
+            cmd = entry.get("command") if isinstance(entry, dict) else getattr(entry, "command", None)
+            args = entry.get("args", []) if isinstance(entry, dict) else getattr(entry, "args", [])
+            if cmd == "mcpm" and len(args) >= 3 and args[0] == "profile" and args[1] == "run" and args[2] == profile_name:
+                if entry_name not in removed:
+                    removed.append(entry_name)
+
+        if not removed:
+            continue
+        results.append((client_key, display, removed))
+        if dry_run:
+            continue
+        after = {k: v for k, v in before.items() if k not in removed}
+        _apply_sync(manager, before, after)
+
+    return results
 
 
 def _server_name_for_entry(entry_name: str, entry):

@@ -109,8 +109,13 @@ def uninstall(server_name, force, no_clients):
             except Exception as exc:
                 logger.debug(f"Client config propagation failed for '{server_name}': {exc}")
                 console.print(
-                    f"[yellow]Could not propagate removal to client configs: {exc}.[/] "
-                    "Run [cyan]mcpm client sync[/] manually to clean up."
+                    f"[yellow]Could not propagate removal to client configs: {exc}.[/]"
+                )
+                console.print(
+                    "  • Inspect what's affected: [cyan]mcpm client sync --dry-run[/]"
+                )
+                console.print(
+                    "  • Then clean up: [cyan]mcpm client sync[/]"
                 )
                 return
 

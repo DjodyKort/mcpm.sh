@@ -85,8 +85,13 @@ def remove_profile(profile_name, force, no_clients):
             except Exception as exc:
                 logger.debug(f"Client config propagation failed for profile '{profile_name}': {exc}")
                 console.print(
-                    f"[yellow]Could not propagate removal to client configs: {exc}.[/] "
-                    "Run [cyan]mcpm client edit[/] manually to clean up."
+                    f"[yellow]Could not propagate removal to client configs: {exc}.[/]"
+                )
+                console.print(
+                    "  • Inspect what's affected: [cyan]mcpm client sync --dry-run[/]"
+                )
+                console.print(
+                    "  • Then clean up via [cyan]mcpm client edit <client>[/] (uncheck the profile)"
                 )
                 return 0
 

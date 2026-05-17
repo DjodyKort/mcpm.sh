@@ -103,6 +103,49 @@ class BaseSkillTranspiler(abc.ABC):
         """
         return []
 
+    def install_hooks(self, skill: SkillConfig, output_root: Path) -> List[str]:
+        """Install this skill's declared lifecycle hooks into the client's config.
+
+        Default implementation: log a single warning if the skill declares any
+        hooks but this client doesn't support them. Returns an empty list.
+
+        Override in client transpilers that have a lifecycle-hook surface to
+        write the appropriate config entries. Implementations MUST be
+        idempotent: re-running on an already-installed skill is a no-op.
+
+        Args:
+            skill: Parsed canonical SkillConfig (with .frontmatter.hooks set).
+            output_root: Sync output root.
+
+        Returns:
+            List of hook identifiers (absolute command paths) that were
+            installed or were already present. Stored in the lockfile so a
+            later sync can remove stale entries during cleanup.
+        """
+        if skill.frontmatter.hooks:
+            logger.warning(
+                f"{self.client_key}: skill '{skill.name}' declares lifecycle hooks "
+                f"({list(skill.frontmatter.hooks)}) but this client does not support hooks; skipped"
+            )
+        return []
+
+    def uninstall_hooks(self, output_root: Path, hook_ids: List[str]) -> List[str]:
+        """Remove previously-installed hook entries from the client's config.
+
+        Default implementation: no-op (hooks were never installed by this
+        client's transpiler, so nothing to remove). Override alongside
+        ``install_hooks`` for clients with a lifecycle-hook surface.
+
+        Args:
+            output_root: Sync output root.
+            hook_ids: Identifiers returned by a prior ``install_hooks`` call
+                for this skill+client.
+
+        Returns:
+            List of identifiers actually removed.
+        """
+        return []
+
     def clean(self, project_root: Path, managed_skills: Optional[List[str]] = None) -> List[Path]:
         """Remove mcpm-managed skill files for this client.
 
@@ -427,6 +470,29 @@ def sync_skills(
                     )
                     if asset_files:
                         entry.output_files.setdefault(client_key, []).extend(asset_files)
+
+                # Lifecycle hooks: skills can declare client-side hooks (e.g.
+                # Claude Code's PreCompact). Each transpiler decides how to
+                # install them; clients without a hook surface emit a single
+                # warning and return []. Asset copy must happen before this
+                # so the target scripts exist before settings.json points at
+                # them.
+                if (
+                    not dry_run
+                    and skill.skill_type == "skill"
+                    and skill.frontmatter.hooks
+                ):
+                    try:
+                        installed = transpiler.install_hooks(skill, output_root)
+                        if installed:
+                            entry.hooks_installed[client_key] = installed
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to install hooks for {skill.name} on {client_key}: {e}"
+                        )
+                        entry.warnings.append(
+                            f"{client_key}: hook install failed: {e}"
+                        )
             except Exception as e:
                 logger.warning(f"Failed to transpile {skill.name} for {client_key}: {e}")
                 entry.warnings.append(f"{client_key}: transpilation failed: {e}")
@@ -474,6 +540,32 @@ def sync_skills(
             cleaned = _delete_stale(stale)
         elif stale and dry_run:
             cleaned = stale  # Report what *would* be removed.
+
+        # Stale-hook cleanup: when a skill is renamed or removed upstream,
+        # any client-side hook entries it registered must be revoked too.
+        # We compute the diff between previous and current lockfiles' hook
+        # installations and ask each transpiler to uninstall the difference.
+        if not dry_run:
+            transpilers_by_key = transpilers
+            for bucket in ("skills", "rules"):
+                prev_entries: Dict[str, LockFileEntry] = getattr(previous, bucket)
+                new_entries: Dict[str, LockFileEntry] = getattr(lockfile, bucket)
+                for name, prev_entry in prev_entries.items():
+                    new_entry = new_entries.get(name)
+                    for client_key, prev_ids in (prev_entry.hooks_installed or {}).items():
+                        new_ids = (new_entry.hooks_installed or {}).get(client_key, []) if new_entry else []
+                        to_remove = [hid for hid in prev_ids if hid not in new_ids]
+                        if not to_remove:
+                            continue
+                        transpiler = transpilers_by_key.get(client_key)
+                        if transpiler is None:
+                            continue
+                        try:
+                            transpiler.uninstall_hooks(output_root, to_remove)
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to uninstall stale hooks for {name} on {client_key}: {e}"
+                            )
 
     # Collision detection: surface pre-existing files at known shadow paths.
     collisions = detect_collisions(skills, per_file_transpilers, output_root)

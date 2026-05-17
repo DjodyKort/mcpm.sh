@@ -87,6 +87,23 @@ def parse_skill_file(path: Path) -> SkillConfig:
 
     frontmatter = SkillFrontmatter(**fm_data)
 
+    # Validate that any declared hook commands resolve to files inside the
+    # skill source directory. Fails fast at parse time, not silently at sync.
+    if frontmatter.hooks:
+        skill_dir = path.parent
+        for event, hook in frontmatter.hooks.items():
+            target = (skill_dir / hook.command).resolve()
+            try:
+                target.relative_to(skill_dir.resolve())
+            except ValueError as exc:
+                raise ValueError(
+                    f"hook '{event}' command must stay inside the skill directory: {hook.command}"
+                ) from exc
+            if not target.is_file():
+                raise ValueError(
+                    f"hook '{event}' command not found at {target} (relative to {skill_dir})"
+                )
+
     # Determine skill type from directory structure or activation mode
     skill_type = _infer_skill_type(path, frontmatter)
 

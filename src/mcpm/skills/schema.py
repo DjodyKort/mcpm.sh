@@ -15,6 +15,45 @@ class SkillDependencies(BaseModel):
     skills: List[str] = []
 
 
+class SkillHook(BaseModel):
+    """A single lifecycle hook declared by a skill.
+
+    Skills use this to ask their host client to fire a bundled script at a
+    specific lifecycle event (e.g. Claude Code's PreCompact, SessionStart).
+    Per-client transpilers translate this declaration into the client's
+    native config format during ``mcpm skills sync``. Clients that do not
+    support lifecycle hooks ignore the field with a one-line warning.
+    """
+
+    # Path to the executable, relative to the skill's source directory.
+    # Resolved to an absolute path inside the synced skill output at install
+    # time by the per-client transpiler.
+    command: str
+
+    # Optional matcher (semantics depend on the client). For Claude Code:
+    # passed through as the hook entry's ``matcher`` field.
+    matcher: str = "*"
+
+    # Hook type. For Claude Code today: "command" (the only supported type).
+    # Future-proof for clients that distinguish e.g. "script" vs "webhook".
+    type: str = "command"
+
+    @field_validator("command")
+    @classmethod
+    def validate_command(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("hook command must be a non-empty path")
+        # Reject absolute paths -- the path must be relative to the skill
+        # source directory so the transpiler can re-root it at the synced
+        # output location.
+        if v.startswith("/") or v.startswith("~"):
+            raise ValueError(
+                "hook command must be a path relative to the skill source dir, "
+                f"got absolute path: {v}"
+            )
+        return v
+
+
 class SkillFrontmatter(BaseModel):
     """Universal frontmatter schema -- superset of Agent Skills spec + mcpm extensions."""
 
@@ -27,6 +66,11 @@ class SkillFrontmatter(BaseModel):
     compatibility: Optional[str] = None
     allowed_tools: Optional[str] = None
     metadata: Dict[str, Any] = {}
+
+    # Lifecycle hooks. Keyed by client-side event name (e.g. "PreCompact",
+    # "SessionStart"). Clients that don't support lifecycle hooks ignore
+    # the field with a single warning per sync. See SkillHook docstring.
+    hooks: Optional[Dict[str, SkillHook]] = None
 
     # mcpm extension fields
     globs: Optional[str] = None
@@ -101,6 +145,10 @@ class LockFileEntry(BaseModel):
     # (project root in project mode, ~ in global mode). Used to detect and clean
     # up stale files when skills are renamed/removed between syncs.
     output_files: Dict[str, List[str]] = {}
+    # Per-client list of hook identifiers (absolute command paths) installed
+    # into the client's config (e.g. ~/.claude/settings.json). Tracked so a
+    # later sync can remove stale entries when a skill is renamed or removed.
+    hooks_installed: Dict[str, List[str]] = {}
 
 
 class LockFile(BaseModel):

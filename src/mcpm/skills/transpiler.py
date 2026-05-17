@@ -19,10 +19,11 @@ MCPM_BLOCK_END = "<!-- mcpm:end -->"
 # Subdirectories within a skill source that are transpiled alongside SKILL.md.
 # Lets skills use progressive disclosure: SKILL.md stays slim while module/
 # reference content lives in adjacent files that the LLM reads on demand.
-SKILL_ASSET_DIRS = ("modules", "reference", "templates", "examples", "assets")
+SKILL_ASSET_DIRS = ("modules", "reference", "templates", "examples", "assets", "scripts")
 SKILL_ASSET_EXTENSIONS = (
     ".md", ".txt", ".json", ".yaml", ".yml",
     ".png", ".svg", ".jpg", ".jpeg", ".webp",
+    ".sh", ".bash", ".py",
 )
 
 

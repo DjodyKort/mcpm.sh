@@ -133,6 +133,71 @@ class TestCopySkillAssets:
         result = _copy_skill_assets(src, dst, output_root=output_root)
         assert result == ["client/src/reference/guide.md"]
 
+    # --- scripts/ subdir support (feat/skill-asset-scripts-dir) -------------
+
+    def test080_scripts_subdir_copied(self, tmp_path):
+        """scripts/ is a recognised asset subdir; .sh files copy."""
+        import os
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "SKILL.md").write_text("# skill")
+        (src / "scripts").mkdir()
+        sh = src / "scripts" / "helper.sh"
+        sh.write_text("#!/usr/bin/env bash\necho hello\n")
+        os.chmod(sh, 0o755)
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        result = _copy_skill_assets(src, dst, output_root=tmp_path)
+        assert len(result) == 1
+        copied = dst / "scripts" / "helper.sh"
+        assert copied.exists()
+        assert copied.read_text() == "#!/usr/bin/env bash\necho hello\n"
+
+    def test081_executable_bit_preserved_on_scripts(self, tmp_path):
+        """shutil.copy2 preserves the executable bit on .sh files."""
+        import os
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "SKILL.md").write_text("# skill")
+        (src / "scripts").mkdir()
+        sh = src / "scripts" / "exec.sh"
+        sh.write_text("#!/usr/bin/env bash\n")
+        os.chmod(sh, 0o755)
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        _copy_skill_assets(src, dst, output_root=tmp_path)
+        copied = dst / "scripts" / "exec.sh"
+        # any of user/group/other execute bit set
+        assert os.stat(copied).st_mode & 0o111 != 0, "executable bit lost on copy"
+
+    def test082_scripts_dir_filters_non_script_extensions(self, tmp_path):
+        """Within scripts/, only whitelisted extensions copy. A .zip is dropped."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "SKILL.md").write_text("# skill")
+        (src / "scripts").mkdir()
+        (src / "scripts" / "good.sh").write_text("#!/usr/bin/env bash\n")
+        (src / "scripts" / "binary.zip").write_text("FAKE-ZIP")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        result = _copy_skill_assets(src, dst, output_root=tmp_path)
+        assert len(result) == 1
+        assert (dst / "scripts" / "good.sh").exists()
+        assert not (dst / "scripts" / "binary.zip").exists()
+
+    def test083_python_helper_copied(self, tmp_path):
+        """`.py` is whitelisted alongside `.sh` for executable helpers."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "SKILL.md").write_text("# skill")
+        (src / "scripts").mkdir()
+        (src / "scripts" / "helper.py").write_text("print('hi')\n")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        result = _copy_skill_assets(src, dst, output_root=tmp_path)
+        assert len(result) == 1
+        assert (dst / "scripts" / "helper.py").exists()
+
 
 class TestSyncSkillsAssetIntegration:
     """End-to-end: sync a skill with asset subdirs and verify output."""

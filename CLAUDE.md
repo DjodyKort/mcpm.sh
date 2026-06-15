@@ -35,9 +35,20 @@ Canonical `SKILL.md` files (YAML frontmatter + Markdown body) are transpiled to 
 
 ### CLI Structure
 
-Entry point: `src/mcpm/cli.py` → Click group `main` with subcommand groups: `skills`, `agents`, `styles`, `profile`, `client` + top-level commands. Plugins load via `importlib.metadata.entry_points(group="mcpm.plugins")`.
+Entry point: `src/mcpm/cli.py` → Click group `main` with subcommand groups: `skills`, `agents`, `styles`, `cc`, `profile`, `client` + top-level commands. Plugins load via `importlib.metadata.entry_points(group="mcpm.plugins")`.
 
 Commands live in `src/mcpm/commands/` — each subcommand group has its own package (e.g., `commands/skills/sync.py`).
+
+### Claude Code plugins (`mcpm cc`)
+
+Claude-Code-only. `mcpm cc update` refreshes Claude Code marketplace catalogs and updates installed plugins from their remotes (mirrors `mcpm update` for MCP servers); `mcpm cc list` shows current state. **Hybrid mechanism**: state is read from Claude Code's on-disk JSON (`~/.claude/plugins/known_marketplaces.json`, `~/.claude/settings.json`), every mutation goes through the `claude plugin` CLI. The group is named `cc` (not `plugins`) to avoid colliding with mcpm's own entry-point plugins.
+
+- `src/mcpm/cc/` — `claude_cli.py` (subprocess wrapper over `claude`), `state.py` (read-only on-disk readers), `updater.py` (`CcUpdateCheck`/`CcUpdateApply`, never-raises like `core/updater.py`)
+- `src/mcpm/commands/cc/` — `update.py`, `list.py`
+
+### Fork maintenance (`scripts/sync-upstream.sh`)
+
+This repo is a fork of `pathintegral-institute/mcpm.sh`. `scripts/sync-upstream.sh [--check] [--rebase]` fetches the `upstream` remote, shows incoming commits, and merges (or rebases) onto a dated `sync-upstream-<date>` branch. Never auto-pushes.
 
 ### Key Conventions
 

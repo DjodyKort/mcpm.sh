@@ -45,6 +45,7 @@ from mcpm.commands import (
 )
 from mcpm.commands.agents import agents
 from mcpm.commands.bridge import bridge_cmd
+from mcpm.commands.cc import cc
 from mcpm.commands.gateway import gateway as gateway_group
 from mcpm.commands.mode import mode_cmd
 from mcpm.commands.share import share
@@ -164,6 +165,7 @@ main.add_command(update.update)
 main.add_command(skills.skills, name="skills")
 main.add_command(agents, name="agents")
 main.add_command(styles_group, name="styles")
+main.add_command(cc, name="cc")
 main.add_command(share)
 
 

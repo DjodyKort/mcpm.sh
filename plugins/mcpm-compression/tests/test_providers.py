@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from mcpm_compression.providers import get_provider, provider_names
-from mcpm_compression.schema import CompressionConfig
+from mcpm_compression.schema import CompressionConfig, ContextRule
 
 
 def test01_registry_has_three_providers():
@@ -47,3 +47,16 @@ def test05_none_is_inert():
     assert p.mcp_server_config(cfg) is None
     assert p.activation_artifacts(cfg) == []
     assert p.health(cfg)["ok"] is True
+
+
+def test06_resolved_provider_matches_context_then_default():
+    cfg = CompressionConfig(
+        provider="headroom",
+        contexts=[
+            ContextRule(match="*/clients/*", provider="none"),
+            ContextRule(match="*/oss/*", provider="rtk-only"),
+        ],
+    )
+    assert cfg.resolved_provider("/Users/x/work/clients/acme") == "none"
+    assert cfg.resolved_provider("/Users/x/oss/foo") == "rtk-only"
+    assert cfg.resolved_provider("/Users/x/personal") == "headroom"  # falls back to default

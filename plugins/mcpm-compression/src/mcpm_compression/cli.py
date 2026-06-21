@@ -145,3 +145,24 @@ def doctor() -> None:
     for name, ok, detail in checks:
         table.add_row(name, "[green]ok[/]" if ok else "[yellow]—[/]", detail)
     console.print(table)
+
+
+@compression.command(
+    name="env",
+    help="Print exportable shell env for a directory's compression policy "
+    "(consumed by launchers like hrclaude; plain stdout for `eval`).",
+)
+@click.option("--cwd", "cwd", default=None,
+              help="Directory to resolve the policy for (default: current dir).")
+def env_cmd(cwd: str) -> None:
+    # Plain stdout only — this is meant to be `eval`'d by a shell, so no rich markup.
+    cwd = cwd or os.getcwd()
+    config = load_config()
+    provider_name = config.resolved_provider(cwd)
+    if provider_name == "headroom" and config.runtime == "proxy":
+        for k, v in get_provider("headroom").runtime_spec(config).env.items():
+            click.echo(f'export {k}="{v}"')
+        click.echo("HRCOMPRESS_LAUNCH=wrap")
+    else:
+        # rtk-only / none → launch plain `claude` (rtk's hook is global; no proxy).
+        click.echo("HRCOMPRESS_LAUNCH=plain")

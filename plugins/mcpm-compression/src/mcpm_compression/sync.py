@@ -6,7 +6,13 @@ from dataclasses import dataclass, field
 from typing import List
 
 from .config import save_config
-from .mcp_presence import add_mcp_server, is_present, remove_mcp_server
+from .mcp_presence import (
+    add_mcp_server,
+    is_present,
+    push_to_clients,
+    remove_from_clients,
+    remove_mcp_server,
+)
 from .providers import get_provider
 from .runtime import launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH
@@ -54,22 +60,34 @@ def apply(config: CompressionConfig, *, persist: bool = True) -> ApplyReport:
 
     provider = get_provider(config.provider)
 
-    # 1. MCP presence (declarative; propagated later by `mcpm client sync`).
+    # 1. MCP presence — register in mcpm AND propagate to the target clients.
+    #    `mcpm client sync` only reconciles entries that already exist; it never
+    #    adds new ones. So we push the entry ourselves (same effect as
+    #    `mcpm client edit <client> --add-server`). This is what makes the whole
+    #    flow declarative: no manual ~/.claude.json edit is ever required.
     desired = provider.mcp_server_config(config)
     if desired:
         try:
             add_mcp_server(desired)
             report.add(f"registered MCP server '{desired['name']}' in mcpm servers.json")
-            report.add("run `mcpm client sync` to propagate to your clients")
+            pushed = push_to_clients(desired["name"], config.clients)
+            if pushed:
+                report.add(f"propagated {_MANAGED_MCP_NAME!r} to clients: {', '.join(pushed)}")
+            else:
+                report.warn(f"no installed target clients to propagate to (clients={config.clients})")
         except Exception as e:  # noqa: BLE001 — surface, don't crash
             report.warn(f"MCP registration failed ({e.__class__.__name__}: {e})")
     else:
-        if is_present(_MANAGED_MCP_NAME):
-            try:
+        # Provider has no MCP server (rtk-only / none): tear it down everywhere.
+        try:
+            if is_present(_MANAGED_MCP_NAME):
                 remove_mcp_server(_MANAGED_MCP_NAME)
-                report.add(f"removed MCP server '{_MANAGED_MCP_NAME}' (provider has none)")
-            except Exception as e:  # noqa: BLE001
-                report.warn(f"MCP removal failed ({e.__class__.__name__}: {e})")
+                report.add(f"removed MCP server '{_MANAGED_MCP_NAME}' from mcpm servers.json")
+            removed = remove_from_clients(_MANAGED_MCP_NAME)  # all clients
+            if removed:
+                report.add(f"removed {_MANAGED_MCP_NAME!r} from clients: {', '.join(removed)}")
+        except Exception as e:  # noqa: BLE001
+            report.warn(f"MCP teardown failed ({e.__class__.__name__}: {e})")
 
     # 2. Activation artifacts. Clear stale ones first, then write the current set.
     _remove_managed_artifacts(report)

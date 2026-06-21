@@ -18,6 +18,9 @@ class CompressionConfig(BaseModel):
     # Resolved from the provider when omitted; explicit override allowed.
     runtime: RuntimeKind = "none"
     scope: List[str] = Field(default_factory=lambda: ["default"])
+    # mcpm ClientRegistry keys to propagate MCP presence to (e.g. "claude-code",
+    # "cursor"). Only the proxy-wrapped clients need it; default to Claude Code.
+    clients: List[str] = Field(default_factory=lambda: ["claude-code"])
     options: Dict[str, Any] = Field(default_factory=dict)
 
     @property

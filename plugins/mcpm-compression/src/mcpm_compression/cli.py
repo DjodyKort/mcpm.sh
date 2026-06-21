@@ -1,6 +1,7 @@
 """`mcpm compression` — manage the swappable context-compression layer."""
 from __future__ import annotations
 
+import os
 import shutil
 
 import click
@@ -8,7 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .config import load_config
-from .mcp_presence import is_present, present_entry
+from .mcp_presence import in_client, is_present, present_entry
 from .providers import get_provider, provider_names
 from .runtime import launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH
@@ -76,11 +77,10 @@ def enable(provider_name: str, port: int, telemetry: str) -> None:
     report = apply(config)
     _print_report(report)
     console.print("\n[bold]Next steps:[/]")
-    console.print("  • [cyan]mcpm client sync[/]   (propagate the MCP server to your clients)")
     if provider_name == "headroom":
-        console.print(f"  • [cyan]source {SHELL_SNIPPET_PATH}[/]   (or via ~/.zshrc) to set ANTHROPIC_BASE_URL")
-        console.print(f"  • optional always-warm: [cyan]launchctl load -w {launchd_plist_path()}[/]")
-    console.print("  • verify: [cyan]mcpm compression status[/]")
+        console.print(f"  • launch via your headroom wrapper, or [cyan]source {SHELL_SNIPPET_PATH}[/] (sets ANTHROPIC_BASE_URL)")
+        console.print(f"  • optional always-warm proxy: [cyan]launchctl load -w {launchd_plist_path()}[/]")
+    console.print("  • verify: [cyan]mcpm compression status[/] / [cyan]doctor[/]   (MCP presence already propagated)")
 
 
 @compression.command(help="Disable compression (remove MCP entry + artifacts).")
@@ -89,7 +89,6 @@ def disable() -> None:
     report = do_disable()
     _print_report(report)
     console.print(f"\n  Note: unload launchd if you loaded it: [cyan]launchctl unload {launchd_plist_path()}[/]")
-    console.print("  Then [cyan]mcpm client sync[/] to remove it from clients.")
 
 
 @compression.command(name="set-provider", help="Swap the active provider and re-apply.")
@@ -123,6 +122,22 @@ def doctor() -> None:
     checks.append(("engine reachable", bool(health.get("ok")), health.get("detail", "")))
     checks.append(("MCP registered", is_present("headroom"),
                    "headroom in servers.json" if is_present("headroom") else "not registered"))
+    clients = in_client("headroom")
+    checks.append(("MCP in clients", bool(clients),
+                   ", ".join(clients) if clients else "not in any client config"))
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    checks.append(("proxy env", base_url.endswith(str(config.port)),
+                   base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
+    try:
+        import subprocess
+        loaded = subprocess.run(
+            ["launchctl", "list", "sh.mcpm.compression.proxy"],
+            capture_output=True, timeout=3,
+        ).returncode == 0
+    except Exception:
+        loaded = False
+    checks.append(("launchd proxy", loaded,
+                   "loaded" if loaded else "not loaded (wrapper mode — ok)"))
     table = Table(show_header=True, box=None)
     table.add_column("check")
     table.add_column("")

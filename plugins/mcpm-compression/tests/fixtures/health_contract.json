@@ -1,0 +1,30 @@
+{
+  "_comment": "Captured from headroom 0.26.0 GET /health. Only the top-level keys the plugin reads are a hard contract; `config` is captured for the optional doctor 'running proxy matches configured preset' check. Full response also includes checks/runtime/rust_core blocks we do not depend on.",
+  "service": "headroom-proxy",
+  "status": "healthy",
+  "ready": true,
+  "version": "0.26.0",
+  "config_keys": [
+    "accuracy_guard",
+    "anthropic_api_url",
+    "backend",
+    "cache",
+    "compress_system_messages",
+    "compress_user_messages",
+    "disable_kompress",
+    "force_kompress",
+    "learn",
+    "max_items_after_crush",
+    "memory",
+    "min_tokens_to_crush",
+    "optimize",
+    "pid",
+    "protect_analysis_context",
+    "protect_recent",
+    "rate_limit",
+    "savings_profile",
+    "smart_crusher_with_compaction",
+    "target_ratio",
+    "target_savings_percent"
+  ]
+}

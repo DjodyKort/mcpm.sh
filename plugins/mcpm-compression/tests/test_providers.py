@@ -23,15 +23,22 @@ def test02_headroom_mcp_and_runtime():
     assert rt.env["HEADROOM_TELEMETRY"] == "off"
 
 
-def test03_headroom_generates_shell_snippet_only():
-    # Phase 3: no hand-rolled plist — only the sourceable shell snippet for the active preset.
+def test03_headroom_generates_env_snippet_and_shim():
+    # Phase 3+5: no hand-rolled plist — a 0o600 env snippet + a 0o644 shell shim.
     p = get_provider("headroom")
     arts = p.activation_artifacts(CompressionConfig(provider="headroom"))
-    assert len(arts) == 1
-    assert arts[0].path.name == "compression-env.sh"
-    assert arts[0].mode == 0o600
-    assert 'ANTHROPIC_BASE_URL="http://127.0.0.1:8787"' in arts[0].content
-    assert 'HEADROOM_MODE="cache"' in arts[0].content
+    by_name = {a.path.name: a for a in arts}
+    assert set(by_name) == {"compression-env.sh", "compression-shims.zsh"}
+
+    snippet = by_name["compression-env.sh"]
+    assert snippet.mode == 0o600
+    assert 'ANTHROPIC_BASE_URL="http://127.0.0.1:8787"' in snippet.content
+    assert 'HEADROOM_MODE="cache"' in snippet.content
+
+    shim = by_name["compression-shims.zsh"]
+    assert shim.mode == 0o644  # sourced, non-secret
+    assert "hrclaude() { mcpm compression run -- " in shim.content
+    assert "hrup()" in shim.content and "hrdown()" in shim.content
 
 
 def test04_rtk_only_has_no_mcp_no_artifacts():

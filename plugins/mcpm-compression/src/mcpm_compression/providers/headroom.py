@@ -8,8 +8,8 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from ..provider import CompressionProvider, GeneratedFile, RuntimeSpec
-from ..runtime import shell_env_snippet
-from ..runtime.shell import SHELL_SNIPPET_PATH
+from ..runtime import shell_env_snippet, shim_snippet
+from ..runtime.shell import SHELL_SNIPPET_PATH, SHIMS_PATH
 from ..schema import CompressionConfig, CompressionPreset
 from .headroom_runtime import proxy_health
 
@@ -56,6 +56,12 @@ class HeadroomProvider(CompressionProvider):
                 content=shell_env_snippet(env),
                 mode=0o600,
                 note="source from ~/.zshrc to route this shell's AI clients (active preset)",
+            ),
+            GeneratedFile(
+                path=SHIMS_PATH,
+                content=shim_snippet(),
+                mode=0o644,
+                note="source from ~/.zshrc for hrclaude/hrup/hrdown/hrstat (replaces headroom-aliases.zsh)",
             ),
         ]
 

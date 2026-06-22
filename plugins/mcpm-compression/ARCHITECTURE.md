@@ -67,6 +67,9 @@ HTTP-calls headroom. Implemented:
   agent-savings --profile <p> --format json`; falls back to `_FALLBACK_PROFILE_ENV`
   (lock-stepped to `tests/fixtures/`) when headroom is absent.
 - `proxy_health(port) -> dict` — `GET /health` → `{ok,detail,version,config}`.
+- `proxy_up(port, env) / proxy_down(port)` — on-demand lifecycle: reuse a healthy
+  proxy, else detached `Popen` (mcpm's `RouterRuntime` pattern) + poll `/health`; stop
+  via the pid from `/health` (fallback `lsof`).
 - `version() -> str|None` — `headroom --version` (doctor drift check vs `PINNED_VERSION`).
 - `mcp_uninstall() / unwrap(client)` — strip path; delegate to `headroom mcp uninstall`
   / `headroom unwrap`.
@@ -74,10 +77,14 @@ HTTP-calls headroom. Implemented:
 `providers/headroom.py` is a thin policy→env mapping (`env_for_preset`); no hardcoded env,
 no plist generation (deleted).
 
-**Lifecycle = on-demand wrapper (default).** The slimmed `~/.config/headroom-aliases.zsh`
-`eval`s `mcpm compression env --cwd $PWD` and starts a proxy on the resolved
-`HRCOMPRESS_PORT` with the full preset env. This is the only lifecycle path and it fully
-supports presets (mode + savings) per port.
+**Launch + lifecycle = Python (mcpm owns it).** `mcpm compression run [-- args]` resolves
+the per-cwd `(provider, preset)`, calls `proxy_up(preset.port, env)`, then `os.execvpe`s
+`claude` with the preset env (hands over the TTY). `mcpm compression proxy up|down|restart`
+manages the active preset's proxy. The plugin generates `~/.config/mcpm/compression-shims.zsh`
+(`hrclaude → mcpm compression run --`, `hrup/hrdown/...`) as an activation artifact; the
+user sources it from `~/.zshrc`, replacing the old hand-maintained `headroom-aliases.zsh`.
+Mode-change requires `proxy restart` (cold-start only). A/B is preset-driven (`use agent`
+/ `use interactive`).
 
 **`headroom install` persistence: deferred.** `install apply` bakes `HEADROOM_MODE` but
 exposes no way to inject the savings-profile env, so a persisted proxy couldn't carry
@@ -97,14 +104,14 @@ wrapper (which carries the full env). Revisit if headroom adds env injection.
 
 `compression.json` carries the full policy (provider + presets + mode + contexts) and is
 wired into mcpm-sync `get_global_sync_files()` as `global/compression.json`
-(`config.py:71`). The migrated policy is in place and ready to sync.
+(`config.py:71`). Verified syncing: `mcpm sync push` pushes it (and the binary skill
+assets) into the encrypted bundle.
 
-**Known external blocker:** `mcpm sync push` currently fails for an *unrelated*
-mcpm-sync defect — `engine.py:94` reads every `skills_repo` file as UTF-8 and crashes on
-binary skill assets (e.g. a `.zip`/`.png` under `skills/figma-*`). This breaks *all*
-pushes (the reason nothing has synced since those assets were added), not just
-compression. Fix belongs in the mcpm-sync submodule (read bytes / base64 for non-text, or
-skip with a warning) — tracked separately from this plugin.
+This needed a fix in the mcpm-sync submodule: `create_bundle` read every file as UTF-8 and
+crashed on binary skill assets (`skills/figma-*/*.zip`/`*.png`), aborting *all* pushes.
+Fixed by a per-entry `encoding: "utf-8"|"base64"` on `SyncEntry` with a binary round-trip
+(base64 before encryption, `write_bytes` on apply) — mcpm-sync `181d88c`, superproject
+pointer bump.
 
 ## Contract fixtures
 `tests/fixtures/agent_savings_agent-90.json`, `…_balanced.json`, `health_contract.json`

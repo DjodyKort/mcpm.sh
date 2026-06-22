@@ -7,13 +7,21 @@ swappable per context — instead of wiring it imperatively per client.
 ```
 mcpm compression status                 # what's active + health + active preset
 mcpm compression enable                  # default provider: headroom, preset: interactive
+mcpm compression run -- <claude args>    # launch claude under this dir's policy (ensures proxy, execs claude)
+mcpm compression proxy up|down|restart   # proxy lifecycle for the active preset
 mcpm compression presets                 # list presets (--refresh re-snapshots from headroom)
 mcpm compression use agent               # switch the active preset
 mcpm compression set-provider rtk-only   # swap provider (lighter, no key-handling proxy)
 mcpm compression disable [--teardown]    # off (--teardown also runs headroom's own removal)
 mcpm compression doctor                  # diagnose (binaries, version pin, port, MCP)
-mcpm compression env --cwd <dir>         # resolved env for a dir (consumed by the wrapper)
+mcpm compression env --cwd <dir>         # resolved env for a dir (for `eval` in a shell)
 ```
+
+## Shell shims
+`enable`/`sync` generate `~/.config/mcpm/compression-shims.zsh` — source it from `~/.zshrc`
+for short commands (`hrclaude` → `mcpm compression run --`, `hrup`/`hrdown`/`hrrestart`/
+`hrstat`/`hrperf`/`hrdash`). This replaces the old hand-maintained `headroom-aliases.zsh`:
+all launch/lifecycle logic now lives in tested Python.
 
 ## Providers
 - **headroom** — full API proxy (compresses every tool result) + MCP retrieve/stats tools.

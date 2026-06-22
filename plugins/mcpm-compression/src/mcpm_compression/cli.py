@@ -11,9 +11,14 @@ from rich.table import Table
 from .config import load_config, save_config
 from .mcp_presence import in_client, is_present, present_entry
 from .providers import get_provider, provider_names
-from .providers.headroom_runtime import PINNED_VERSION, version as hr_version
+from .providers.headroom_runtime import (
+    PINNED_VERSION,
+    proxy_down as hr_proxy_down,
+    proxy_up as hr_proxy_up,
+    version as hr_version,
+)
 from .runtime import LAUNCHD_LABEL, launchd_plist_path
-from .runtime.shell import SHELL_SNIPPET_PATH
+from .runtime.shell import SHELL_SNIPPET_PATH, SHIMS_PATH
 from .schema import DEFAULT_PORT
 from .sync import apply, disable as do_disable
 
@@ -115,9 +120,10 @@ def enable(provider_name: str, port: int | None, telemetry: str | None,
     _print_report(report)
     console.print("\n[bold]Next steps:[/]")
     if provider_name == "headroom":
-        console.print(f"  • launch via your hrclaude wrapper, or [cyan]source {SHELL_SNIPPET_PATH}[/] "
-                      "(sets ANTHROPIC_BASE_URL for the active preset)")
-        console.print("  • the wrapper starts the proxy on demand on the resolved preset's port")
+        console.print(f"  • add to ~/.zshrc: [cyan]source {SHIMS_PATH}[/]  "
+                      "(hrclaude/hrup/hrdown — replaces headroom-aliases.zsh)")
+        console.print("  • or launch directly: [cyan]mcpm compression run -- <claude args>[/]  "
+                      "(resolves the per-dir preset, ensures the proxy, execs claude)")
     console.print("  • verify: [cyan]mcpm compression status[/] / [cyan]doctor[/]   (MCP presence already propagated)")
 
 
@@ -262,3 +268,66 @@ def env_cmd(cwd: str) -> None:
     else:
         # rtk-only / none → launch plain `claude` (rtk's hook is global; no proxy).
         click.echo("HRCOMPRESS_LAUNCH=plain")
+
+
+@compression.command(
+    name="run",
+    help="Launch claude under this directory's compression policy "
+    "(resolves the preset, ensures the proxy, then execs claude).",
+    context_settings=dict(ignore_unknown_options=True),
+)
+@click.option("--cwd", "cwd", default=None, help="Directory to resolve the policy for.")
+@click.argument("claude_args", nargs=-1, type=click.UNPROCESSED)
+def run(cwd: str, claude_args: tuple) -> None:
+    cwd = cwd or os.getcwd()
+    config = load_config()
+    provider_name, preset_name = config.resolve(cwd)
+    child_env = dict(os.environ)
+    if provider_name == "headroom" and _DEFAULT_RUNTIME.get(provider_name) == "proxy":
+        preset = config.preset_for(preset_name)
+        env = get_provider("headroom").env_for_preset(config, preset)
+        ok, detail = hr_proxy_up(preset.port, env)
+        (err.print if not ok else lambda *_: None)(f"  [yellow]![/] {detail}")
+        child_env.update(env)
+    else:
+        # none / rtk-only → go direct (rtk's hook is global; no proxy).
+        child_env.pop("ANTHROPIC_BASE_URL", None)
+    # Hand the TTY to claude: replace this process, do not wrap it.
+    os.execvpe("claude", ["claude", *claude_args], child_env)
+
+
+@compression.group(help="Proxy lifecycle for the active preset (up / down / restart).")
+def proxy() -> None:
+    pass
+
+
+def _active_port_env():
+    config = load_config()
+    preset = config.preset_for()
+    env = get_provider("headroom").env_for_preset(config, preset)
+    return preset.port, env
+
+
+@proxy.command("up", help="Start the proxy for the active preset (if not already up).")
+def proxy_up_cmd() -> None:
+    port, env = _active_port_env()
+    ok, detail = hr_proxy_up(port, env)
+    (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]"
+                                         f"{'✓' if ok else '✗'}[/] {detail}")
+
+
+@proxy.command("down", help="Stop the proxy on the active preset's port.")
+def proxy_down_cmd() -> None:
+    port, _ = _active_port_env()
+    ok, detail = hr_proxy_down(port)
+    (console.print if ok else err.print)(f"  [{'green' if ok else 'yellow'}]"
+                                         f"{'✓' if ok else '!'}[/] {detail}")
+
+
+@proxy.command("restart", help="Restart the proxy (needed to change a cold-start mode).")
+def proxy_restart_cmd() -> None:
+    port, env = _active_port_env()
+    hr_proxy_down(port)
+    ok, detail = hr_proxy_up(port, env)
+    (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]"
+                                         f"{'✓' if ok else '✗'}[/] {detail}")

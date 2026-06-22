@@ -5,17 +5,36 @@ provider routes your AI clients' traffic — declaratively, version-controlled,
 swappable per context — instead of wiring it imperatively per client.
 
 ```
-mcpm compression status                 # what's active + health
-mcpm compression enable                 # default provider: headroom
-mcpm compression set-provider rtk-only  # swap (lighter, no key-handling proxy)
-mcpm compression disable                # off
-mcpm compression doctor                 # diagnose
+mcpm compression status                 # what's active + health + active preset
+mcpm compression enable                  # default provider: headroom, preset: interactive
+mcpm compression presets                 # list presets (--refresh re-snapshots from headroom)
+mcpm compression use agent               # switch the active preset
+mcpm compression set-provider rtk-only   # swap provider (lighter, no key-handling proxy)
+mcpm compression disable [--teardown]    # off (--teardown also runs headroom's own removal)
+mcpm compression doctor                  # diagnose (binaries, version pin, port, MCP)
+mcpm compression env --cwd <dir>         # resolved env for a dir (consumed by the wrapper)
 ```
 
 ## Providers
 - **headroom** — full API proxy (compresses every tool result) + MCP retrieve/stats tools.
 - **rtk-only** — Bash/CLI-output compression via rtk's hook; no proxy, no API-key handling.
 - **none** — disabled.
+
+## Presets (headroom)
+A preset bundles headroom's knobs (`mode`, `savings_profile`, the Read-outliner, port) as
+**policy in `compression.json`** — the `HEADROOM_*` env is a config-time snapshot seeded
+from `headroom agent-savings`, so the launch path reads config only. Built-ins:
+- **interactive** — `cache` mode on :8787. Preserves the prompt-cache prefix; best for
+  long interactive sessions.
+- **agent** — `token` + `agent-90` on :8788. For batch/agent launches that share no
+  prefix (cache mode's benefit is moot → aggressive compression is near-pure gain). A
+  separate port lets it run alongside `interactive` (mode is fixed per proxy process).
+  Read-outliner OFF by default — it's an A/B hypothesis, not a verdict.
+- **balanced** — headroom's mid profile (`token`, lighter).
+
+Route per directory with context rules (`compression.json` → `contexts`), e.g.
+`{"match": "*/agent-batch/*", "preset": "agent"}`. The wrapper starts the right proxy on
+the resolved port on demand.
 
 ## Two surfaces (the hard boundary)
 - **MCP server presence** is managed declaratively via mcpm's `servers.json` +

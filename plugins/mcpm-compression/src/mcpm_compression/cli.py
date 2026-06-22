@@ -12,10 +12,13 @@ from .config import load_config, save_config
 from .mcp_presence import in_client, is_present, present_entry
 from .providers import get_provider, provider_names
 from .providers.headroom_runtime import (
-    PINNED_VERSION,
+    CONTRACT_VERSION,
     proxy_down as hr_proxy_down,
     proxy_up as hr_proxy_up,
+    snapshot_profile_env,
+    upgrade as hr_upgrade,
     version as hr_version,
+    version_tuple,
 )
 from .runtime import LAUNCHD_LABEL, launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH, SHIMS_PATH
@@ -64,10 +67,16 @@ def status() -> None:
         table.add_row("version", str(health["version"]))
     if config.provider == "headroom":
         v = hr_version()
-        if v and v != PINNED_VERSION:
-            table.add_row("headroom", f"[yellow]{v} — pinned {PINNED_VERSION} (drift)[/]")
-        elif v:
-            table.add_row("headroom", f"{v} (pinned {PINNED_VERSION})")
+        if not v:
+            table.add_row("headroom", "[yellow]not on PATH[/]")
+        elif version_tuple(v) < version_tuple(CONTRACT_VERSION):
+            table.add_row("headroom", f"[yellow]{v} — below contract {CONTRACT_VERSION}; "
+                          f"run `mcpm compression update`[/]")
+        elif v == CONTRACT_VERSION:
+            table.add_row("headroom", f"{v} (contract {CONTRACT_VERSION})")
+        else:
+            table.add_row("headroom", f"{v} (newer than contract {CONTRACT_VERSION}; "
+                          "`update` re-syncs if needed)")
     desired = provider.mcp_server_config(config)
     mcp_name = desired["name"] if desired else None
     if mcp_name:
@@ -179,7 +188,6 @@ def use_preset(preset_name: str) -> None:
 def presets(refresh: bool) -> None:
     config = load_config()
     if refresh:
-        from .providers.headroom_runtime import snapshot_profile_env
         for p in config.presets.values():
             if p.savings_profile:
                 p.env = snapshot_profile_env(p.savings_profile)
@@ -193,6 +201,30 @@ def presets(refresh: bool) -> None:
                       name, p.mode, p.savings_profile or "—", str(p.port),
                       "on" if p.intercept_tool_results else "off")
     console.print(table)
+
+
+@compression.command(help="Upgrade headroom to latest, then re-snapshot the preset env from the new binary.")
+def update() -> None:
+    console.print("[bold]Updating headroom[/]")
+    ok, detail, before, after = hr_upgrade()
+    (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]"
+                                         f"{'✓' if ok else '✗'}[/] {detail}")
+    if not ok:
+        return
+    # Re-derive the preset env from the (possibly new) binary so config stays truthful.
+    config = load_config()
+    for p in config.presets.values():
+        if p.savings_profile:
+            p.env = snapshot_profile_env(p.savings_profile)
+    save_config(config)
+    console.print("  [green]✓[/] re-snapshotted preset env from headroom")
+    if after and after != CONTRACT_VERSION:
+        console.print(f"  [dim]note: running {after}; bundled contract/fixtures captured at "
+                      f"{CONTRACT_VERSION}. Live snapshot is authoritative; refresh fixtures if you "
+                      f"maintain the plugin.[/]")
+    if before != after:
+        console.print("  • restart proxies to run the new binary: [cyan]mcpm compression proxy restart[/] "
+                      "(close attached sessions first)")
 
 
 @compression.command(help="Re-apply the current config (idempotent reconcile).")
@@ -212,8 +244,10 @@ def doctor() -> None:
                    shutil.which("rtk") or "not on PATH (optional)"))
     if shutil.which("headroom"):
         v = hr_version()
-        checks.append(("headroom version", v == PINNED_VERSION,
-                       f"{v} (pinned {PINNED_VERSION})" if v else "unknown"))
+        # OK as long as we're at or above the contract version (newer is fine — we track latest).
+        ok_ver = bool(v) and version_tuple(v) >= version_tuple(CONTRACT_VERSION)
+        checks.append(("headroom version", ok_ver,
+                       f"{v} (contract {CONTRACT_VERSION})" if v else "unknown"))
     health = get_provider(config.provider).health(config)
     checks.append(("engine reachable", bool(health.get("ok")), health.get("detail", "")))
     desired = get_provider(config.provider).mcp_server_config(config)

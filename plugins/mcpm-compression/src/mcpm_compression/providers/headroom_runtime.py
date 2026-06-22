@@ -4,8 +4,11 @@ Every headroom CLI/HTTP touchpoint lives here so a version bump or a provider sw
 touches one file (see ARCHITECTURE.md). The launch hot-path never calls into here —
 these are config-time (snapshot) and diagnostic (health/version) operations only.
 
-Contract is pinned to headroom 0.26.0. Undocumented commands (`agent-savings`) fall
-back to a captured constant; `tests/fixtures/` asserts the constant matches the binary.
+We track "latest" (uv constraint `>=CONTRACT_VERSION`), not a hard pin. `CONTRACT_VERSION`
+is the headroom version the bundled fallback constant + `tests/fixtures/` were last
+captured & verified against. `mcpm compression update` upgrades headroom and re-snapshots
+the live contract, so newer-than-contract is fine: the live snapshot is always correct and
+the constant is only an offline fallback (used when headroom isn't on PATH).
 """
 from __future__ import annotations
 
@@ -20,12 +23,17 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# The headroom version this adapter's contract was captured against.
-PINNED_VERSION = "0.26.0"
+# The headroom version this adapter's contract (fallback constant + fixtures) was
+# captured & verified against. Running a newer version is expected and fine.
+CONTRACT_VERSION = "0.27.0"
+# Minimum we install (uv constraint floor). Never silently downgrade below the
+# version the contract was validated at.
+MIN_VERSION = "0.27.0"
 
-# Captured from `headroom agent-savings --profile <p> --format json` on 0.26.0.
-# Used when the (undocumented) command is unavailable. Kept in lock-step with
-# tests/fixtures/agent_savings_*.json (test asserts equality).
+# Captured from `headroom agent-savings --profile <p> --format json`; identical on
+# 0.26.0 and 0.27.0. Used only when the (undocumented) command is unavailable
+# (headroom off PATH). Kept in lock-step with tests/fixtures/agent_savings_*.json
+# (test asserts equality); `mcpm compression update` re-snapshots the live values.
 _FALLBACK_PROFILE_ENV: Dict[str, Dict[str, str]] = {
     "agent-90": {
         "HEADROOM_ACCURACY_GUARD": "strict",
@@ -193,6 +201,40 @@ def _run(args: list, timeout: int = 30) -> tuple:
         return (res.returncode == 0, detail[-1] if detail else "ok")
     except Exception as e:
         return (False, f"{e.__class__.__name__}: {e}")
+
+
+def version_tuple(v: Optional[str]) -> tuple:
+    """Parse 'X.Y.Z' to a comparable tuple; () for unknown/unparseable."""
+    if not v:
+        return ()
+    try:
+        return tuple(int(x) for x in v.split(".")[:3])
+    except ValueError:
+        return ()
+
+
+def upgrade() -> Tuple[bool, str, Optional[str], Optional[str]]:
+    """Upgrade headroom to the latest allowed by the uv tool constraint (>=MIN_VERSION).
+
+    Returns (ok, detail, before, after). No-op-safe if uv/headroom is missing.
+    """
+    before = version()
+    if not shutil.which("uv"):
+        return (False, "uv not on PATH — upgrade headroom manually", before, before)
+    try:
+        res = subprocess.run(
+            ["uv", "tool", "upgrade", "headroom-ai"],
+            capture_output=True, timeout=300, text=True,
+        )
+    except Exception as e:
+        return (False, f"upgrade failed ({e.__class__.__name__}: {e})", before, before)
+    after = version()
+    if res.returncode != 0:
+        tail = (res.stderr or res.stdout or "").strip().splitlines()
+        return (False, tail[-1] if tail else "uv tool upgrade failed", before, after)
+    if before == after:
+        return (True, f"already latest ({after})", before, after)
+    return (True, f"upgraded {before} → {after}", before, after)
 
 
 def mcp_uninstall() -> tuple:

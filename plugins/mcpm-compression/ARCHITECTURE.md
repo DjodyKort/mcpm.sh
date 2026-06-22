@@ -1,6 +1,9 @@
 # mcpm-compression — architecture & integration contract
 
-Status: living doc. Pinned headroom: **`headroom-ai==0.26.0`** (extras `proxy,code,ml`).
+Status: living doc. headroom: **track latest** via uv constraint `>=0.27.0` (extras
+`proxy,code,ml`). `CONTRACT_VERSION` (currently `0.27.0`) marks the version the bundled
+fallback + fixtures were verified against; `mcpm compression update` upgrades and
+re-snapshots the live contract (see Versioning).
 
 ## What this plugin is (and is not)
 
@@ -30,7 +33,7 @@ process (read at launch), so the activation env is emitted for a thin shell wrap
 Rule: the **launch hot-path depends only on documented-stable contracts**. Undocumented
 commands are used only at **config time** (snapshotting into our config), never per launch.
 
-## Integration contract (against pinned 0.26.0)
+## Integration contract (verified at CONTRACT_VERSION 0.27.0)
 
 ### Documented-stable — safe to depend on at runtime
 | Surface | Use |
@@ -42,21 +45,33 @@ commands are used only at **config time** (snapshotting into our config), never 
 | `headroom mcp install` / `headroom mcp uninstall` | MCP tool registration (idempotent) |
 | core `HEADROOM_*` env vars | proxy configuration |
 
-### Undocumented — version-pinned, config-time only (never hot-path)
+### Undocumented — re-verified on update, config-time only (never hot-path)
 | Surface | Use | Mitigation |
 | --- | --- | --- |
-| `headroom agent-savings --profile <name> --format json` | seed a preset's env snapshot | snapshot once into `compression.json`; pinned to 0.26.0; fixtures in `tests/fixtures/` |
+| `headroom agent-savings --profile <name> --format json` | seed a preset's env snapshot | snapshotted live into `compression.json`; `update` re-snapshots on every upgrade; fixtures pin the offline fallback (identical 0.26→0.27) |
 | `headroom install apply\|start\|stop\|status\|remove` (`--profile/--port/--mode`) | optional always-on persistence | opt-in only; default is on-demand wrapper |
 | profile names `agent-90`, `balanced` | preset seeds | captured in fixtures; user-overridable |
 
-### Drift / gotchas (0.26.0)
-- `POST /admin/runtime-env` is in headroom's README but **absent in 0.26.0** → mode
+### Versioning — track latest, re-verify on update
+- We do **not** hard-pin. uv constraint is `>=MIN_VERSION` (0.27.0); `mcpm compression
+  update` runs `uv tool upgrade headroom-ai` and then **re-snapshots every preset's env**
+  from the new binary, so the synced policy stays truthful across upgrades.
+- `CONTRACT_VERSION` is the version the bundled fallback constant + `tests/fixtures/`
+  were captured/verified at. Running newer is expected and fine — the **live snapshot is
+  authoritative**; the constant is only an offline fallback (headroom off PATH).
+- `status`/`doctor` report running vs contract: below contract ⇒ warn + suggest `update`;
+  at/above ⇒ ok. Never a hard fail on "newer".
+- The 0.26→0.27 bump was contract-clean: `agent-savings` (both profiles) and `/health`
+  shape are byte-identical; 0.27's `HEADROOM_TELEMETRY=off` default is moot (we set it
+  explicitly). When bumping, run `update` (and `presets --refresh`); if `agent-savings`
+  ever changes, refresh `tests/fixtures/` + the fallback constant.
+
+### Drift / gotchas
+- `POST /admin/runtime-env` is in headroom's README but **absent through 0.27.0** → mode
   change requires a proxy **restart**, never per-request.
 - Mode is **cold-start per process**; simultaneous cache+token ⇒ two proxies/ports.
 - Subagents inherit the parent's `ANTHROPIC_BASE_URL` ⇒ routing is per **launched**
   client/dir, not per subagent.
-- 0.27.0 (released 2026-06-22) flips `HEADROOM_TELEMETRY` default to off and extends
-  `unwrap`; we pin 0.26.0. `doctor` warns when the live `headroom --version` ≠ pin.
 
 ## `headroom_runtime` adapter (the swap seam)
 
@@ -70,7 +85,10 @@ HTTP-calls headroom. Implemented:
 - `proxy_up(port, env) / proxy_down(port)` — on-demand lifecycle: reuse a healthy
   proxy, else detached `Popen` (mcpm's `RouterRuntime` pattern) + poll `/health`; stop
   via the pid from `/health` (fallback `lsof`).
-- `version() -> str|None` — `headroom --version` (doctor drift check vs `PINNED_VERSION`).
+- `version() -> str|None` / `version_tuple()` — `headroom --version` (status/doctor compare
+  vs `CONTRACT_VERSION`).
+- `upgrade() -> (ok, detail, before, after)` — `uv tool upgrade headroom-ai`; backs
+  `mcpm compression update` (which then re-snapshots preset env).
 - `mcp_uninstall() / unwrap(client)` — strip path; delegate to `headroom mcp uninstall`
   / `headroom unwrap`.
 
@@ -115,5 +133,6 @@ pointer bump.
 
 ## Contract fixtures
 `tests/fixtures/agent_savings_agent-90.json`, `…_balanced.json`, `health_contract.json`
-— captured from pinned 0.26.0; Phase 2 tests assert emitted env against these instead of
-a live shell-out.
+— verified at `CONTRACT_VERSION` (0.27.0; identical to 0.26.0). Tests assert the emitted
+env / fallback constant against these instead of a live shell-out. Refresh them only if a
+future `headroom agent-savings` actually changes (run `update` first, then re-capture).

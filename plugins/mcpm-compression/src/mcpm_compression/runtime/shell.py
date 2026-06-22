@@ -40,6 +40,7 @@ def shim_snippet() -> str:
         "hrdown()   { mcpm compression proxy down; }      # stop it\n"
         "hrrestart(){ mcpm compression proxy restart; }   # restart (apply a mode change)\n"
         "hrstat()   { mcpm compression status; }\n"
+        "hrupdate() { mcpm compression update; }          # upgrade headroom + re-snapshot presets\n"
         "hrperf()   { headroom perf \"$@\"; }              # savings report (headroom passthrough)\n"
         "hrdash()   { open \"http://127.0.0.1:8787/dashboard\" 2>/dev/null || headroom perf; }\n"
     )

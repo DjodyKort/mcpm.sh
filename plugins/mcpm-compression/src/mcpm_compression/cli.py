@@ -74,8 +74,10 @@ def status() -> None:
         table.add_row("MCP server", "[dim]n/a — provider has no MCP server[/]")
     table.add_row("shell snippet", str(SHELL_SNIPPET_PATH) if SHELL_SNIPPET_PATH.exists()
                   else "[dim]none[/]")
-    table.add_row("launchd plist", str(launchd_plist_path()) if launchd_plist_path().exists()
-                  else "[dim]none[/]")
+    table.add_row("lifecycle", "on-demand (wrapper)")
+    if launchd_plist_path().exists():
+        table.add_row("legacy plist",
+                      f"[yellow]{launchd_plist_path()} — run `mcpm compression sync` to remove[/]")
     console.print(table)
 
 
@@ -113,18 +115,29 @@ def enable(provider_name: str, port: int | None, telemetry: str | None,
     _print_report(report)
     console.print("\n[bold]Next steps:[/]")
     if provider_name == "headroom":
-        console.print(f"  • launch via your headroom wrapper, or [cyan]source {SHELL_SNIPPET_PATH}[/] (sets ANTHROPIC_BASE_URL)")
-        console.print(f"  • optional always-warm proxy: [cyan]launchctl load -w {launchd_plist_path()}[/]")
+        console.print(f"  • launch via your hrclaude wrapper, or [cyan]source {SHELL_SNIPPET_PATH}[/] "
+                      "(sets ANTHROPIC_BASE_URL for the active preset)")
+        console.print("  • the wrapper starts the proxy on demand on the resolved preset's port")
     console.print("  • verify: [cyan]mcpm compression status[/] / [cyan]doctor[/]   (MCP presence already propagated)")
 
 
 @compression.command(help="Disable compression (remove MCP entry + artifacts).")
-def disable() -> None:
+@click.option("--teardown", is_flag=True,
+              help="Also run headroom's own removal (mcp uninstall + unwrap claude).")
+def disable(teardown: bool) -> None:
     console.print("[bold]Disabling compression[/]")
     report = do_disable()
     _print_report(report)
-    console.print(f"\n  Note: if you loaded the launchd job, remove it: "
-                  f"[cyan]launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}[/]")
+    if teardown:
+        from .providers.headroom_runtime import mcp_uninstall, unwrap
+        for label, (ok, detail) in [("headroom mcp uninstall", mcp_uninstall()),
+                                     ("headroom unwrap claude", unwrap("claude"))]:
+            (console.print if ok else err.print)(f"  [{'green' if ok else 'yellow'}]"
+                                                  f"{'✓' if ok else '!'}[/] {label} — {detail}")
+        console.print("  [dim]Note: ~/.headroom/ data (toin/savings/memory) is left in place.[/]")
+    if launchd_plist_path().exists():
+        console.print(f"\n  Note: a legacy launchd job may still be loaded — remove with "
+                      f"[cyan]launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}[/]")
 
 
 @compression.command(name="set-provider", help="Swap the active provider and re-apply.")
@@ -211,16 +224,10 @@ def doctor() -> None:
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
     checks.append(("proxy env", base_url.endswith(str(config.preset_for().port)),
                    base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
-    try:
-        import subprocess
-        loaded = subprocess.run(
-            ["launchctl", "list", "sh.mcpm.compression.proxy"],
-            capture_output=True, timeout=3,
-        ).returncode == 0
-    except Exception:
-        loaded = False
-    checks.append(("launchd proxy", loaded,
-                   "loaded" if loaded else "not loaded (wrapper mode — ok)"))
+    legacy = launchd_plist_path().exists()
+    checks.append(("legacy plist", not legacy,
+                   "none (on-demand wrapper)" if not legacy
+                   else f"{launchd_plist_path()} — run `mcpm compression sync` to remove"))
     table = Table(show_header=True, box=None)
     table.add_column("check")
     table.add_column("")

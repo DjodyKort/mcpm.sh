@@ -5,11 +5,10 @@ this module is the thin policy→env mapping.
 """
 from __future__ import annotations
 
-import shutil
 from typing import Dict, List, Optional
 
 from ..provider import CompressionProvider, GeneratedFile, RuntimeSpec
-from ..runtime import launchd_plist, launchd_plist_path, shell_env_snippet
+from ..runtime import shell_env_snippet
 from ..runtime.shell import SHELL_SNIPPET_PATH
 from ..schema import CompressionConfig, CompressionPreset
 from .headroom_runtime import proxy_health
@@ -47,25 +46,16 @@ class HeadroomProvider(CompressionProvider):
         return RuntimeSpec(kind="proxy", port=preset.port, env=self.env_for_preset(config, preset))
 
     def activation_artifacts(self, config: CompressionConfig) -> List[GeneratedFile]:
-        preset = config.preset_for()
-        env = self.env_for_preset(config, preset)
-        proxy_bin = shutil.which("headroom") or "headroom"
-        plist = launchd_plist(
-            program_args=[proxy_bin, "proxy", "--port", str(preset.port), "--mode", preset.mode],
-            env={"HEADROOM_TELEMETRY": config.telemetry},
-        )
+        # Only the sourceable shell snippet for the active preset. Proxy lifecycle is
+        # on-demand via the wrapper (no hand-rolled launchd plist); the wrapper reads
+        # the per-cwd env from `mcpm compression env`.
+        env = self.env_for_preset(config, config.preset_for())
         return [
             GeneratedFile(
                 path=SHELL_SNIPPET_PATH,
                 content=shell_env_snippet(env),
                 mode=0o600,
-                note="source from ~/.zshrc to compress this shell's AI clients",
-            ),
-            GeneratedFile(
-                path=launchd_plist_path(),
-                content=plist,
-                mode=0o644,
-                note="launchctl load -w <path> to keep the proxy always warm",
+                note="source from ~/.zshrc to route this shell's AI clients (active preset)",
             ),
         ]
 

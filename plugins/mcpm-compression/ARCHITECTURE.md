@@ -58,41 +58,53 @@ commands are used only at **config time** (snapshotting into our config), never 
 - 0.27.0 (released 2026-06-22) flips `HEADROOM_TELEMETRY` default to off and extends
   `unwrap`; we pin 0.26.0. `doctor` warns when the live `headroom --version` ≠ pin.
 
-## `headroom_runtime` adapter interface (Phase 2)
+## `headroom_runtime` adapter (the swap seam)
 
-Single module `providers/headroom_runtime.py` — the only place that shells out to / HTTP-calls headroom:
+Single module `providers/headroom_runtime.py` — the only place that shells out to /
+HTTP-calls headroom. Implemented:
 
-- `snapshot_profile_env(profile: str) -> dict[str,str]` — config-time; runs
-  `headroom agent-savings --profile <profile> --format json`; returns the `HEADROOM_*`
-  map. Falls back to the committed fixture if the command is unavailable.
-- `proxy_health(port: int) -> dict` — `GET /health`; returns `{ok,detail,version,config}`.
-- `proxy_up(port, env) / proxy_down(port)` — on-demand lifecycle (nohup today; the
-  wrapper currently owns start, adapter owns the contract).
-- `persist(profile, port, mode, env) / unpersist(profile)` — opt-in, delegates to
-  `headroom install apply|remove`.
-- `mcp_install() / mcp_uninstall()` — delegates to `headroom mcp …` (strip path).
-- `version() -> str` — `headroom --version`; used by `doctor` drift check.
+- `snapshot_profile_env(profile) -> dict[str,str]` — config-time; runs `headroom
+  agent-savings --profile <p> --format json`; falls back to `_FALLBACK_PROFILE_ENV`
+  (lock-stepped to `tests/fixtures/`) when headroom is absent.
+- `proxy_health(port) -> dict` — `GET /health` → `{ok,detail,version,config}`.
+- `version() -> str|None` — `headroom --version` (doctor drift check vs `PINNED_VERSION`).
+- `mcp_uninstall() / unwrap(client)` — strip path; delegate to `headroom mcp uninstall`
+  / `headroom unwrap`.
 
-`providers/headroom.py` becomes a thin policy→adapter mapping (no hardcoded env, no
-plist generation).
+`providers/headroom.py` is a thin policy→env mapping (`env_for_preset`); no hardcoded env,
+no plist generation (deleted).
 
-## Strip path (Phase 3)
+**Lifecycle = on-demand wrapper (default).** The slimmed `~/.config/headroom-aliases.zsh`
+`eval`s `mcpm compression env --cwd $PWD` and starts a proxy on the resolved
+`HRCOMPRESS_PORT` with the full preset env. This is the only lifecycle path and it fully
+supports presets (mode + savings) per port.
+
+**`headroom install` persistence: deferred.** `install apply` bakes `HEADROOM_MODE` but
+exposes no way to inject the savings-profile env, so a persisted proxy couldn't carry
+agent-90. Rather than hack the generated plist, persistence is left to the on-demand
+wrapper (which carries the full env). Revisit if headroom adds env injection.
+
+## Strip path
 
 `mcpm compression disable [--teardown]`:
-1. Always: remove `mcpm_headroom` from clients + `servers.json`; remove generated
-   artifacts (shell snippet). (Plist is deleted in Phase 3; lifecycle moves to wrapper /
-   `headroom install`.)
-2. `--teardown` also: `headroom mcp uninstall`; `headroom unwrap claude` if wrapped;
-   `headroom install remove --profile <name>` if persisted.
-3. Document residue: `~/.headroom/` (toin.json, proxy_savings.json, memory.db) is not
-   removed by headroom — note it; do not delete it ourselves.
+1. Always: remove `mcpm_headroom` from clients + `servers.json`; remove the shell
+   snippet; clean up any legacy launchd plist left by older versions.
+2. `--teardown` also: `headroom mcp uninstall` + `headroom unwrap claude` (best-effort,
+   reported).
+3. Residue: `~/.headroom/` (toin/savings/memory) is left in place — documented, not ours.
 
 ## Sync
 
 `compression.json` carries the full policy (provider + presets + mode + contexts) and is
-listed in mcpm-sync `get_global_sync_files()` as `global/compression.json`. Phase 3
-verifies it actually lands in the bundle (it was missing — last push predated the
-plugin) and re-pushes.
+wired into mcpm-sync `get_global_sync_files()` as `global/compression.json`
+(`config.py:71`). The migrated policy is in place and ready to sync.
+
+**Known external blocker:** `mcpm sync push` currently fails for an *unrelated*
+mcpm-sync defect — `engine.py:94` reads every `skills_repo` file as UTF-8 and crashes on
+binary skill assets (e.g. a `.zip`/`.png` under `skills/figma-*`). This breaks *all*
+pushes (the reason nothing has synced since those assets were added), not just
+compression. Fix belongs in the mcpm-sync submodule (read bytes / base64 for non-text, or
+skip with a warning) — tracked separately from this plugin.
 
 ## Contract fixtures
 `tests/fixtures/agent_savings_agent-90.json`, `…_balanced.json`, `health_contract.json`

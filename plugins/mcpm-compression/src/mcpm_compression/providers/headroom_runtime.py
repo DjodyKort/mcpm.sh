@@ -110,3 +110,26 @@ def version() -> Optional[str]:
         return m.group(1) if m else None
     except Exception:
         return None
+
+
+def _run(args: list, timeout: int = 30) -> tuple:
+    """Run a headroom subcommand; return (ok, detail). No-op (ok=False) if headroom absent."""
+    exe = _headroom()
+    if not exe:
+        return (False, "headroom not on PATH")
+    try:
+        res = subprocess.run([exe, *args], capture_output=True, timeout=timeout, text=True)
+        detail = (res.stdout or res.stderr or "").strip().splitlines()
+        return (res.returncode == 0, detail[-1] if detail else "ok")
+    except Exception as e:
+        return (False, f"{e.__class__.__name__}: {e}")
+
+
+def mcp_uninstall() -> tuple:
+    """Strip path: remove headroom's own MCP registration (documented, idempotent)."""
+    return _run(["mcp", "uninstall"])
+
+
+def unwrap(client: str = "claude") -> tuple:
+    """Strip path: ledger-backed reversal of `headroom wrap` for a client."""
+    return _run(["unwrap", client])

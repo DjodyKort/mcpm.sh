@@ -23,15 +23,15 @@ def test02_headroom_mcp_and_runtime():
     assert rt.env["HEADROOM_TELEMETRY"] == "off"
 
 
-def test03_headroom_generates_two_artifacts():
+def test03_headroom_generates_shell_snippet_only():
+    # Phase 3: no hand-rolled plist — only the sourceable shell snippet for the active preset.
     p = get_provider("headroom")
     arts = p.activation_artifacts(CompressionConfig(provider="headroom"))
-    assert len(arts) == 2
-    assert any(a.path.name.endswith(".plist") for a in arts)
-    assert any(a.path.name == "compression-env.sh" for a in arts)
-    # plist must contain the proxy invocation
-    plist = next(a for a in arts if a.path.name.endswith(".plist"))
-    assert "proxy" in plist.content and "8787" in plist.content
+    assert len(arts) == 1
+    assert arts[0].path.name == "compression-env.sh"
+    assert arts[0].mode == 0o600
+    assert 'ANTHROPIC_BASE_URL="http://127.0.0.1:8787"' in arts[0].content
+    assert 'HEADROOM_MODE="cache"' in arts[0].content
 
 
 def test04_rtk_only_has_no_mcp_no_artifacts():

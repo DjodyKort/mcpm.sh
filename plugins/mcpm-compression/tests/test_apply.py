@@ -28,6 +28,9 @@ from mcpm_compression.schema import CompressionConfig, ContextRule  # noqa: E402
 # Never let artifact cleanup touch the real launchd plist under ~/Library.
 _SNIPPET = _TMP / "compression-env.sh"
 sync_mod._MANAGED_ARTIFACTS = [_SNIPPET]
+# These tests exercise MCP/artifact orchestration; preset materialization (which would
+# shell out to headroom) is covered in test_presets, so stub it out here for hermeticity.
+sync_mod._materialize_presets = lambda config, report: None
 
 
 class _FakeProvider:

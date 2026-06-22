@@ -8,9 +8,10 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from .config import load_config
+from .config import load_config, save_config
 from .mcp_presence import in_client, is_present, present_entry
 from .providers import get_provider, provider_names
+from .providers.headroom_runtime import PINNED_VERSION, version as hr_version
 from .runtime import LAUNCHD_LABEL, launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH
 from .schema import DEFAULT_PORT
@@ -47,12 +48,21 @@ def status() -> None:
     table = Table(show_header=False, box=None, pad_edge=False)
     table.add_row("provider", f"[bold]{config.provider}[/]")
     table.add_row("runtime", config.runtime)
+    preset = config.preset_for()
+    table.add_row("preset", f"{config.active_preset}  "
+                  f"(mode={preset.mode}, profile={preset.savings_profile or '—'}, port={preset.port})")
     table.add_row("scope", ", ".join(config.scope))
     ok = health.get("ok")
     table.add_row("engine", f"[green]healthy[/] — {health.get('detail','')}" if ok
                   else f"[red]down[/] — {health.get('detail','')}")
     if health.get("version"):
         table.add_row("version", str(health["version"]))
+    if config.provider == "headroom":
+        v = hr_version()
+        if v and v != PINNED_VERSION:
+            table.add_row("headroom", f"[yellow]{v} — pinned {PINNED_VERSION} (drift)[/]")
+        elif v:
+            table.add_row("headroom", f"{v} (pinned {PINNED_VERSION})")
     desired = provider.mcp_server_config(config)
     mcp_name = desired["name"] if desired else None
     if mcp_name:
@@ -76,16 +86,29 @@ def status() -> None:
               help=f"Proxy port (default {DEFAULT_PORT}; preserved if already set).")
 @click.option("--telemetry", type=click.Choice(["off", "on"]), default=None,
               help="Telemetry (default off; preserved if already set).")
-def enable(provider_name: str, port: int | None, telemetry: str | None) -> None:
-    # Load-merge so we never clobber existing contexts/clients/scope or unrelated options.
+@click.option("--preset", "preset_name", default=None,
+              help="Active preset (e.g. interactive/agent/balanced).")
+@click.option("--mode", type=click.Choice(["cache", "token"]), default=None,
+              help="Override the active preset's compression mode.")
+def enable(provider_name: str, port: int | None, telemetry: str | None,
+           preset_name: str | None, mode: str | None) -> None:
+    # Load-merge so we never clobber existing contexts/clients/scope/presets.
     config = load_config()
     config.provider = provider_name
     config.runtime = _DEFAULT_RUNTIME.get(provider_name, "none")
+    if preset_name:
+        if preset_name not in config.presets:
+            err.print(f"[red]unknown preset {preset_name!r}[/] (have: {', '.join(config.presets)})")
+            raise SystemExit(1)
+        config.active_preset = preset_name
+    if mode:
+        config.presets[config.active_preset].mode = mode
     if port is not None:
-        config.options["port"] = port
+        config.presets[config.active_preset].port = port
     if telemetry is not None:
         config.options["telemetry"] = telemetry
-    console.print(f"[bold]Enabling compression: {provider_name}[/]")
+    console.print(f"[bold]Enabling compression: {provider_name}[/] "
+                  f"(preset {config.active_preset}, mode {config.preset_for().mode})")
     report = apply(config)
     _print_report(report)
     console.print("\n[bold]Next steps:[/]")
@@ -116,6 +139,43 @@ def set_provider(provider_name: str) -> None:
     console.print("  Then [cyan]mcpm client sync[/].")
 
 
+@compression.command(name="use", help="Switch the active preset and re-apply.")
+@click.argument("preset_name")
+def use_preset(preset_name: str) -> None:
+    config = load_config()
+    if preset_name not in config.presets:
+        err.print(f"[red]unknown preset {preset_name!r}[/] (have: {', '.join(config.presets)})")
+        raise SystemExit(1)
+    config.active_preset = preset_name
+    p = config.presets[preset_name]
+    console.print(f"[bold]Active preset → {preset_name}[/] "
+                  f"(mode={p.mode}, profile={p.savings_profile or '—'}, port={p.port})")
+    report = apply(config)
+    _print_report(report)
+    console.print("  Note: mode is fixed at proxy cold-start — restart the proxy to apply a mode change.")
+
+
+@compression.command(help="List presets (optionally re-snapshot their headroom env).")
+@click.option("--refresh", is_flag=True, help="Re-snapshot each preset's env from `headroom agent-savings`.")
+def presets(refresh: bool) -> None:
+    config = load_config()
+    if refresh:
+        from .providers.headroom_runtime import snapshot_profile_env
+        for p in config.presets.values():
+            if p.savings_profile:
+                p.env = snapshot_profile_env(p.savings_profile)
+        save_config(config)
+        console.print("[green]re-snapshotted preset env from headroom[/]")
+    table = Table(show_header=True, box=None)
+    for col in ("", "preset", "mode", "savings", "port", "read-outliner"):
+        table.add_column(col)
+    for name, p in config.presets.items():
+        table.add_row("●" if name == config.active_preset else "",
+                      name, p.mode, p.savings_profile or "—", str(p.port),
+                      "on" if p.intercept_tool_results else "off")
+    console.print(table)
+
+
 @compression.command(help="Re-apply the current config (idempotent reconcile).")
 def sync() -> None:
     config = load_config()
@@ -131,6 +191,10 @@ def doctor() -> None:
                    shutil.which("headroom") or "not on PATH"))
     checks.append(("rtk binary", shutil.which("rtk") is not None,
                    shutil.which("rtk") or "not on PATH (optional)"))
+    if shutil.which("headroom"):
+        v = hr_version()
+        checks.append(("headroom version", v == PINNED_VERSION,
+                       f"{v} (pinned {PINNED_VERSION})" if v else "unknown"))
     health = get_provider(config.provider).health(config)
     checks.append(("engine reachable", bool(health.get("ok")), health.get("detail", "")))
     desired = get_provider(config.provider).mcp_server_config(config)
@@ -145,7 +209,7 @@ def doctor() -> None:
     else:
         checks.append(("MCP registered", True, "provider has no MCP server (ok)"))
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-    checks.append(("proxy env", base_url.endswith(str(config.port)),
+    checks.append(("proxy env", base_url.endswith(str(config.preset_for().port)),
                    base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
     try:
         import subprocess
@@ -177,13 +241,16 @@ def env_cmd(cwd: str) -> None:
     # Plain stdout only — this is meant to be `eval`'d by a shell, so no rich markup.
     cwd = cwd or os.getcwd()
     config = load_config()
-    provider_name = config.resolved_provider(cwd)
+    provider_name, preset_name = config.resolve(cwd)
     # Runtime follows the *resolved* provider, not the global default — a context rule
     # selecting headroom must engage the proxy even when the global provider isn't headroom.
     runtime = _DEFAULT_RUNTIME.get(provider_name, "none")
     if provider_name == "headroom" and runtime == "proxy":
-        for k, v in get_provider("headroom").runtime_spec(config).env.items():
+        preset = config.preset_for(preset_name)
+        for k, v in get_provider("headroom").env_for_preset(config, preset).items():
             click.echo(f'export {k}="{v}"')
+        click.echo(f"HRCOMPRESS_PORT={preset.port}")
+        click.echo(f"HRCOMPRESS_PRESET={preset_name}")
         click.echo("HRCOMPRESS_LAUNCH=route")
     else:
         # rtk-only / none → launch plain `claude` (rtk's hook is global; no proxy).

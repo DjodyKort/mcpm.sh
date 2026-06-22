@@ -11,7 +11,8 @@ def test01_registry_has_three_providers():
 
 def test02_headroom_mcp_and_runtime():
     p = get_provider("headroom")
-    cfg = CompressionConfig(provider="headroom", options={"port": 9000})
+    cfg = CompressionConfig(provider="headroom")
+    cfg.presets["interactive"].port = 9000  # port is now an attribute of the active preset
     mcp = p.mcp_server_config(cfg)
     assert mcp["command"] == "headroom" and mcp["args"] == ["mcp", "serve"]
     assert mcp["proxy_mode"] == "direct"

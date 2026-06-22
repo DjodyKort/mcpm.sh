@@ -1,28 +1,38 @@
-"""Headroom provider — proxy (compresses everything) + MCP retrieve/stats tools."""
+"""Headroom provider — maps compression *policy* (presets) to the headroom runtime.
+
+All actual headroom CLI/HTTP calls live in `headroom_runtime` (the swappable seam);
+this module is the thin policy→env mapping.
+"""
 from __future__ import annotations
 
-import json
 import shutil
-import urllib.request
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from ..provider import CompressionProvider, GeneratedFile, RuntimeSpec
 from ..runtime import launchd_plist, launchd_plist_path, shell_env_snippet
 from ..runtime.shell import SHELL_SNIPPET_PATH
-from ..schema import CompressionConfig
+from ..schema import CompressionConfig, CompressionPreset
+from .headroom_runtime import proxy_health
 
 
 class HeadroomProvider(CompressionProvider):
     name = "headroom"
 
-    def _env(self, config: CompressionConfig) -> dict:
-        # ENABLE_TOOL_SEARCH: without it, a custom ANTHROPIC_BASE_URL makes Claude
-        # Code eager-load every tool schema and balloon context (headroom #746).
-        return {
-            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{config.port}",
-            "ENABLE_TOOL_SEARCH": "true",
-            "HEADROOM_TELEMETRY": config.telemetry,
-        }
+    def env_for_preset(self, config: CompressionConfig, preset: CompressionPreset) -> Dict[str, str]:
+        """Build the launch env for a preset: its HEADROOM_* snapshot plus the knobs
+        mcpm owns. `preset.mode` is authoritative (overrides any mode in the snapshot)."""
+        env: Dict[str, str] = dict(preset.env)
+        env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{preset.port}"
+        # ENABLE_TOOL_SEARCH: without it, a custom ANTHROPIC_BASE_URL makes Claude Code
+        # eager-load every tool schema and balloon context (headroom #746).
+        env["ENABLE_TOOL_SEARCH"] = "true"
+        env["HEADROOM_MODE"] = preset.mode
+        env["HEADROOM_TELEMETRY"] = config.telemetry
+        if preset.intercept_tool_results:
+            env["HEADROOM_INTERCEPT_ENABLED"] = "1"
+        if preset.code_aware:
+            env["HEADROOM_CODE_AWARE_ENABLED"] = "true"
+        return env
 
     def mcp_server_config(self, config: CompressionConfig) -> Optional[dict]:
         return {
@@ -33,13 +43,15 @@ class HeadroomProvider(CompressionProvider):
         }
 
     def runtime_spec(self, config: CompressionConfig) -> RuntimeSpec:
-        return RuntimeSpec(kind="proxy", port=config.port, env=self._env(config))
+        preset = config.preset_for()
+        return RuntimeSpec(kind="proxy", port=preset.port, env=self.env_for_preset(config, preset))
 
     def activation_artifacts(self, config: CompressionConfig) -> List[GeneratedFile]:
-        env = self._env(config)
+        preset = config.preset_for()
+        env = self.env_for_preset(config, preset)
         proxy_bin = shutil.which("headroom") or "headroom"
         plist = launchd_plist(
-            program_args=[proxy_bin, "proxy", "--port", str(config.port)],
+            program_args=[proxy_bin, "proxy", "--port", str(preset.port), "--mode", preset.mode],
             env={"HEADROOM_TELEMETRY": config.telemetry},
         )
         return [
@@ -58,13 +70,4 @@ class HeadroomProvider(CompressionProvider):
         ]
 
     def health(self, config: CompressionConfig) -> dict:
-        url = f"http://127.0.0.1:{config.port}/health"
-        try:
-            with urllib.request.urlopen(url, timeout=3) as r:
-                body = json.loads(r.read().decode())
-            status = body.get("status", "?")
-            return {"ok": bool(body.get("ready")), "detail": f"proxy {status} on :{config.port}",
-                    "version": body.get("version"), "port": config.port}
-        except Exception as e:
-            return {"ok": False, "detail": f"proxy not reachable on :{config.port} ({e.__class__.__name__})",
-                    "port": config.port}
+        return proxy_health(config.preset_for().port)

@@ -11,9 +11,9 @@ from rich.table import Table
 from .config import load_config
 from .mcp_presence import in_client, is_present, present_entry
 from .providers import get_provider, provider_names
-from .runtime import launchd_plist_path
+from .runtime import LAUNCHD_LABEL, launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH
-from .schema import DEFAULT_PORT, CompressionConfig
+from .schema import DEFAULT_PORT
 from .sync import apply, disable as do_disable
 
 console = Console()
@@ -53,8 +53,15 @@ def status() -> None:
                   else f"[red]down[/] — {health.get('detail','')}")
     if health.get("version"):
         table.add_row("version", str(health["version"]))
-    entry = present_entry("headroom")
-    table.add_row("MCP server", "[green]registered in mcpm[/]" if entry else "[dim]not in mcpm servers.json[/]")
+    desired = provider.mcp_server_config(config)
+    mcp_name = desired["name"] if desired else None
+    if mcp_name:
+        entry = present_entry(mcp_name)
+        table.add_row("MCP server",
+                      f"[green]registered in mcpm[/] ({mcp_name})" if entry
+                      else f"[dim]not in mcpm servers.json[/] ({mcp_name})")
+    else:
+        table.add_row("MCP server", "[dim]n/a — provider has no MCP server[/]")
     table.add_row("shell snippet", str(SHELL_SNIPPET_PATH) if SHELL_SNIPPET_PATH.exists()
                   else "[dim]none[/]")
     table.add_row("launchd plist", str(launchd_plist_path()) if launchd_plist_path().exists()
@@ -65,14 +72,19 @@ def status() -> None:
 @compression.command(help="Enable compression with a provider (default: headroom).")
 @click.option("--provider", "provider_name", type=click.Choice(provider_names()),
               default="headroom", show_default=True)
-@click.option("--port", type=int, default=DEFAULT_PORT, show_default=True)
-@click.option("--telemetry", type=click.Choice(["off", "on"]), default="off", show_default=True)
-def enable(provider_name: str, port: int, telemetry: str) -> None:
-    config = CompressionConfig(
-        provider=provider_name,
-        runtime=_DEFAULT_RUNTIME.get(provider_name, "none"),
-        options={"port": port, "telemetry": telemetry},
-    )
+@click.option("--port", type=int, default=None,
+              help=f"Proxy port (default {DEFAULT_PORT}; preserved if already set).")
+@click.option("--telemetry", type=click.Choice(["off", "on"]), default=None,
+              help="Telemetry (default off; preserved if already set).")
+def enable(provider_name: str, port: int | None, telemetry: str | None) -> None:
+    # Load-merge so we never clobber existing contexts/clients/scope or unrelated options.
+    config = load_config()
+    config.provider = provider_name
+    config.runtime = _DEFAULT_RUNTIME.get(provider_name, "none")
+    if port is not None:
+        config.options["port"] = port
+    if telemetry is not None:
+        config.options["telemetry"] = telemetry
     console.print(f"[bold]Enabling compression: {provider_name}[/]")
     report = apply(config)
     _print_report(report)
@@ -88,7 +100,8 @@ def disable() -> None:
     console.print("[bold]Disabling compression[/]")
     report = do_disable()
     _print_report(report)
-    console.print(f"\n  Note: unload launchd if you loaded it: [cyan]launchctl unload {launchd_plist_path()}[/]")
+    console.print(f"\n  Note: if you loaded the launchd job, remove it: "
+                  f"[cyan]launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}[/]")
 
 
 @compression.command(name="set-provider", help="Swap the active provider and re-apply.")
@@ -120,11 +133,17 @@ def doctor() -> None:
                    shutil.which("rtk") or "not on PATH (optional)"))
     health = get_provider(config.provider).health(config)
     checks.append(("engine reachable", bool(health.get("ok")), health.get("detail", "")))
-    checks.append(("MCP registered", is_present("headroom"),
-                   "headroom in servers.json" if is_present("headroom") else "not registered"))
-    clients = in_client("headroom")
-    checks.append(("MCP in clients", bool(clients),
-                   ", ".join(clients) if clients else "not in any client config"))
+    desired = get_provider(config.provider).mcp_server_config(config)
+    mcp_name = desired["name"] if desired else None
+    if mcp_name:
+        present = is_present(mcp_name)
+        checks.append(("MCP registered", present,
+                       f"{mcp_name} in servers.json" if present else f"{mcp_name} not registered"))
+        clients = in_client(mcp_name)
+        checks.append(("MCP in clients", bool(clients),
+                       ", ".join(clients) if clients else "not in any client config"))
+    else:
+        checks.append(("MCP registered", True, "provider has no MCP server (ok)"))
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
     checks.append(("proxy env", base_url.endswith(str(config.port)),
                    base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
@@ -159,10 +178,13 @@ def env_cmd(cwd: str) -> None:
     cwd = cwd or os.getcwd()
     config = load_config()
     provider_name = config.resolved_provider(cwd)
-    if provider_name == "headroom" and config.runtime == "proxy":
+    # Runtime follows the *resolved* provider, not the global default — a context rule
+    # selecting headroom must engage the proxy even when the global provider isn't headroom.
+    runtime = _DEFAULT_RUNTIME.get(provider_name, "none")
+    if provider_name == "headroom" and runtime == "proxy":
         for k, v in get_provider("headroom").runtime_spec(config).env.items():
             click.echo(f'export {k}="{v}"')
-        click.echo("HRCOMPRESS_LAUNCH=wrap")
+        click.echo("HRCOMPRESS_LAUNCH=route")
     else:
         # rtk-only / none → launch plain `claude` (rtk's hook is global; no proxy).
         click.echo("HRCOMPRESS_LAUNCH=plain")

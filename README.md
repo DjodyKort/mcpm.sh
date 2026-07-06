@@ -73,6 +73,7 @@ MCPM supports managing MCP servers, skills, agents, and styles for the following
 | Roo Code | Yes | Yes | Yes | Yes (native toggle) |
 | Cline | Yes | Yes | -- | Yes |
 | Continue | Yes | Yes | -- | Yes |
+| OpenCode | Yes | -- | -- | -- |
 | JetBrains AI | -- | Yes | -- | Yes |
 | Goose | Yes | Yes | -- | Yes |
 | Trae | Yes | Yes | -- | Yes |

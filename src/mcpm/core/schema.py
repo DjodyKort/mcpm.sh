@@ -10,6 +10,7 @@ class BaseServerConfig(BaseModel):
     profile_tags: List[str] = []
     proxy_mode: ProxyMode = "auto"
     requires_session_pinning: bool = False
+    enabled: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return self.model_dump()

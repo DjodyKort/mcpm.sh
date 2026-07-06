@@ -238,3 +238,171 @@ def pull_rebase(repo_path: Path) -> GitResult:
         return GitResult(success=False, error=f"git pull --rebase timed out after {GIT_TIMEOUT}s")
     except FileNotFoundError:
         return GitResult(success=False, error="git not found on PATH")
+
+
+# ---- Fork-sync primitives ----
+#
+# These support replaying a fork's own commits onto a separate `upstream`
+# remote (see mcpm.core.fork_sync). Unlike pull_rebase above, the rebase /
+# cherry-pick helpers here do NOT auto-abort on conflict — the caller inspects
+# conflicted_files() and decides whether to hand the conflict to a human or
+# abort. Query helpers return values/None; action helpers return GitResult.
+
+
+def remote_exists(repo_path: Path, remote: str) -> bool:
+    """Whether ``remote`` is configured in the repo."""
+    try:
+        result = _run_git(repo_path, ["remote", "get-url", remote], timeout=5)
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def current_branch(repo_path: Path) -> Optional[str]:
+    """Current branch name, or None when detached / on error."""
+    try:
+        result = _run_git(repo_path, ["branch", "--show-current"], timeout=5)
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def rev_parse(repo_path: Path, ref: str) -> Optional[str]:
+    """Resolve ``ref`` to a full SHA, or None when it doesn't exist."""
+    try:
+        result = _run_git(repo_path, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], timeout=5)
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def merge_base(repo_path: Path, ref_a: str, ref_b: str) -> Optional[str]:
+    """Best common ancestor of two refs, or None."""
+    try:
+        result = _run_git(repo_path, ["merge-base", ref_a, ref_b], timeout=10)
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def ahead_behind(repo_path: Path, upstream_ref: str, head_ref: str = "HEAD") -> Optional[tuple]:
+    """Return ``(ahead, behind)`` of ``head_ref`` relative to ``upstream_ref``."""
+    try:
+        result = _run_git(
+            repo_path,
+            ["rev-list", "--left-right", "--count", f"{upstream_ref}...{head_ref}"],
+            timeout=10,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.split()
+            if len(parts) == 2:
+                behind, ahead = int(parts[0]), int(parts[1])
+                return ahead, behind
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass
+    return None
+
+
+def commits_by_author(repo_path: Path, rev_range: str, author_email: str) -> List[str]:
+    """SHAs in ``rev_range`` authored by ``author_email``, oldest first, merges excluded."""
+    try:
+        result = _run_git(
+            repo_path,
+            ["log", "--reverse", "--no-merges", "--format=%H", f"--author={author_email}", rev_range],
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return []
+
+
+def conflicted_files(repo_path: Path) -> List[str]:
+    """Paths currently in an unmerged (conflicted) state."""
+    try:
+        result = _run_git(repo_path, ["diff", "--name-only", "--diff-filter=U"], timeout=10)
+        if result.returncode == 0:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return []
+
+
+def create_and_checkout_branch(repo_path: Path, name: str, start_point: str, force: bool = False) -> GitResult:
+    """Create (or reset, when ``force``) ``name`` at ``start_point`` and check it out."""
+    flag = "-B" if force else "-b"
+    try:
+        result = _run_git(repo_path, ["checkout", flag, name, start_point], timeout=GIT_TIMEOUT)
+        if result.returncode == 0:
+            return GitResult(success=True, message=(result.stderr.strip() or result.stdout.strip()))
+        return GitResult(success=False, error=f"git checkout {flag} {name} failed: {result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        return GitResult(success=False, error="git checkout timed out")
+    except FileNotFoundError:
+        return GitResult(success=False, error="git not found on PATH")
+
+
+def checkout(repo_path: Path, ref: str) -> GitResult:
+    """Check out an existing ref/branch."""
+    try:
+        result = _run_git(repo_path, ["checkout", ref], timeout=GIT_TIMEOUT)
+        if result.returncode == 0:
+            return GitResult(success=True)
+        return GitResult(success=False, error=f"git checkout {ref} failed: {result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        return GitResult(success=False, error="git checkout timed out")
+    except FileNotFoundError:
+        return GitResult(success=False, error="git not found on PATH")
+
+
+def rebase_onto(repo_path: Path, onto_ref: str) -> GitResult:
+    """Rebase the current branch onto ``onto_ref``. Leaves conflicts in place."""
+    try:
+        result = _run_git(repo_path, ["rebase", onto_ref], timeout=GIT_TIMEOUT)
+        if result.returncode == 0:
+            return GitResult(success=True, message=result.stdout.strip())
+        return GitResult(success=False, error=(result.stderr.strip() or result.stdout.strip()))
+    except subprocess.TimeoutExpired:
+        return GitResult(success=False, error=f"git rebase timed out after {GIT_TIMEOUT}s")
+    except FileNotFoundError:
+        return GitResult(success=False, error="git not found on PATH")
+
+
+def cherry_pick(repo_path: Path, shas: List[str]) -> GitResult:
+    """Cherry-pick ``shas`` in order. Stops at the first conflict (no auto-abort)."""
+    if not shas:
+        return GitResult(success=True, message="nothing to cherry-pick")
+    try:
+        result = _run_git(repo_path, ["cherry-pick", *shas], timeout=GIT_TIMEOUT)
+        if result.returncode == 0:
+            return GitResult(success=True, message=result.stdout.strip())
+        return GitResult(success=False, error=(result.stderr.strip() or result.stdout.strip()))
+    except subprocess.TimeoutExpired:
+        return GitResult(success=False, error=f"git cherry-pick timed out after {GIT_TIMEOUT}s")
+    except FileNotFoundError:
+        return GitResult(success=False, error="git not found on PATH")
+
+
+def abort_rebase(repo_path: Path) -> GitResult:
+    """Abort an in-progress rebase."""
+    try:
+        result = _run_git(repo_path, ["rebase", "--abort"], timeout=GIT_TIMEOUT)
+        return GitResult(success=result.returncode == 0, error=(None if result.returncode == 0 else result.stderr.strip()))
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return GitResult(success=False, error=str(e))
+
+
+def abort_cherry_pick(repo_path: Path) -> GitResult:
+    """Abort an in-progress cherry-pick."""
+    try:
+        result = _run_git(repo_path, ["cherry-pick", "--abort"], timeout=GIT_TIMEOUT)
+        return GitResult(success=result.returncode == 0, error=(None if result.returncode == 0 else result.stderr.strip()))
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return GitResult(success=False, error=str(e))

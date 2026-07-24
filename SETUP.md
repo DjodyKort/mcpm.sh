@@ -15,7 +15,7 @@ Install mcpm from this fork with skills, agents, styles, and sync support.
 # Clone
 git clone git@github.com:DjodyKort/mcpm.sh.git
 cd mcpm.sh
-git checkout feature/cc-plugins-and-fork-sync
+git checkout main
 git submodule update --init --recursive
 
 # Install mcpm (editable — changes take effect immediately)
@@ -40,7 +40,7 @@ mcpm mcp doctor
 # Clone
 git clone git@github.com:DjodyKort/mcpm.sh.git
 cd mcpm.sh
-git checkout feature/cc-plugins-and-fork-sync
+git checkout main
 git submodule update --init --recursive
 
 # Install mcpm (editable)
@@ -246,8 +246,8 @@ cd mcpm.sh
 follows whatever branch is checked out and globs `plugins/*/` with a `pyproject.toml` guard,
 so new plugins register automatically and empty/uninitialized submodules are skipped.
 
-> The compression and context plugins live only on the active feature branch, not on `main`
-> — so "latest" tracks the current branch, never a hard switch to `main`.
+> All plugins now live on `main`; `scripts/update.sh` follows whatever branch is checked
+> out, so it keeps your checkout current without a hard branch switch.
 
 ## Daily workflow
 

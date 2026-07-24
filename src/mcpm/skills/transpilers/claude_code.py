@@ -21,7 +21,7 @@ class ClaudeCodeTranspiler(BaseSkillTranspiler):
             # Rules go to .claude/rules/<name>.md with optional frontmatter
             fields = {}
             if fm.globs:
-                fields["paths"] = fm.globs
+                fields["paths"] = self._paths_list(fm.globs)
             frontmatter = self._render_frontmatter(fields)
             content = f"{frontmatter}\n\n{skill.body}\n" if frontmatter else f"{skill.body}\n"
         else:
@@ -42,6 +42,13 @@ class ClaudeCodeTranspiler(BaseSkillTranspiler):
             content=content,
             warnings=warnings,
         )
+
+    @staticmethod
+    def _paths_list(globs: str) -> str:
+        # Claude Code rules expect `paths:` as a YAML list; mcpm's `globs` is a
+        # comma-separated string (Cursor convention) → render a flow sequence.
+        items = [g.strip() for g in globs.split(",") if g.strip()]
+        return "[" + ", ".join(f'"{g}"' for g in items) + "]"
 
     def get_output_path(self, skill: SkillConfig, project_root: Path) -> Path:
         if skill.skill_type == "rule":

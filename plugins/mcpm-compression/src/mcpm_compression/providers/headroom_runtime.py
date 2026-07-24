@@ -4,11 +4,15 @@ Every headroom CLI/HTTP touchpoint lives here so a version bump or a provider sw
 touches one file (see ARCHITECTURE.md). The launch hot-path never calls into here —
 these are config-time (snapshot) and diagnostic (health/version) operations only.
 
-We track "latest" (uv constraint `>=CONTRACT_VERSION`), not a hard pin. `CONTRACT_VERSION`
-is the headroom version the bundled fallback constant + `tests/fixtures/` were last
-captured & verified against. `mcpm compression update` upgrades headroom and re-snapshots
-the live contract, so newer-than-contract is fine: the live snapshot is always correct and
-the constant is only an offline fallback (used when headroom isn't on PATH).
+We pin exactly (`==provider_version.pin`), never a floor. headroom ships ~2 releases/week
+and 0.30 began seeding a default persona into any unset knob, so a floating constraint
+rewrites the runtime without touching the config. `mcpm compression update --to X --accept`
+is the only path that moves the pin.
+
+There is deliberately no offline fallback for the profile snapshot. A bundled constant
+means one preset name resolves to two different runtimes depending on whether the binary
+is on PATH — exactly the drift this module exists to prevent. With an exact pin, a missing
+binary is a condition worth surfacing, not papering over.
 """
 from __future__ import annotations
 
@@ -23,49 +27,9 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# The headroom version this adapter's contract (fallback constant + fixtures) was
-# captured & verified against. Running a newer version is expected and fine.
-CONTRACT_VERSION = "0.27.0"
-# Minimum we install (uv constraint floor). Never silently downgrade below the
-# version the contract was validated at.
-MIN_VERSION = "0.27.0"
 
-# Captured from `headroom agent-savings --profile <p> --format json`; identical on
-# 0.26.0 and 0.27.0. Used only when the (undocumented) command is unavailable
-# (headroom off PATH). Kept in lock-step with tests/fixtures/agent_savings_*.json
-# (test asserts equality); `mcpm compression update` re-snapshots the live values.
-_FALLBACK_PROFILE_ENV: Dict[str, Dict[str, str]] = {
-    "agent-90": {
-        "HEADROOM_ACCURACY_GUARD": "strict",
-        "HEADROOM_COMPRESS_SYSTEM_MESSAGES": "1",
-        "HEADROOM_COMPRESS_USER_MESSAGES": "1",
-        "HEADROOM_FORCE_KOMPRESS": "1",
-        "HEADROOM_MAX_ITEMS": "8",
-        "HEADROOM_MIN_TOKENS": "120",
-        "HEADROOM_MODE": "token",
-        "HEADROOM_PROTECT_ANALYSIS_CONTEXT": "1",
-        "HEADROOM_PROTECT_RECENT": "2",
-        "HEADROOM_SAVINGS_PROFILE": "agent-90",
-        "HEADROOM_SAVINGS_TARGET": "0.90",
-        "HEADROOM_SMART_CRUSHER_COMPACTION": "0",
-        "HEADROOM_TARGET_RATIO": "0.10",
-    },
-    "balanced": {
-        "HEADROOM_ACCURACY_GUARD": "strict",
-        "HEADROOM_COMPRESS_SYSTEM_MESSAGES": "0",
-        "HEADROOM_COMPRESS_USER_MESSAGES": "0",
-        "HEADROOM_FORCE_KOMPRESS": "0",
-        "HEADROOM_MAX_ITEMS": "15",
-        "HEADROOM_MIN_TOKENS": "250",
-        "HEADROOM_MODE": "token",
-        "HEADROOM_PROTECT_ANALYSIS_CONTEXT": "1",
-        "HEADROOM_PROTECT_RECENT": "4",
-        "HEADROOM_SAVINGS_PROFILE": "balanced",
-        "HEADROOM_SAVINGS_TARGET": "0.70",
-        "HEADROOM_SMART_CRUSHER_COMPACTION": "1",
-        "HEADROOM_TARGET_RATIO": "0.30",
-    },
-}
+class HeadroomUnavailable(RuntimeError):
+    """The pinned headroom build isn't callable, so no truthful snapshot is possible."""
 
 
 def _headroom() -> Optional[str]:
@@ -75,23 +39,29 @@ def _headroom() -> Optional[str]:
 def snapshot_profile_env(profile: str) -> Dict[str, str]:
     """Config-time: resolve a savings profile to its HEADROOM_* env bundle.
 
-    Prefers the live binary (`headroom agent-savings`); falls back to the captured
-    constant so config writes still work when headroom isn't on PATH. Returns {} for
-    an unknown profile with no fallback.
+    Runs `headroom agent-savings --profile <p> --format json` against the installed build.
+    Raises rather than guessing: a snapshot is a factual claim about one specific binary,
+    and inventing one is how the config came to describe a version nobody was running.
     """
     exe = _headroom()
-    if exe:
-        try:
-            res = subprocess.run(
-                [exe, "agent-savings", "--profile", profile, "--format", "json"],
-                capture_output=True, timeout=10, text=True,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                data = json.loads(res.stdout)
-                return {str(k): str(v) for k, v in data.items()}
-        except Exception:
-            pass
-    return dict(_FALLBACK_PROFILE_ENV.get(profile, {}))
+    if not exe:
+        raise HeadroomUnavailable(
+            "headroom is not on PATH — cannot snapshot profile env. "
+            "Install the pinned build: mcpm compression pin --install"
+        )
+    try:
+        res = subprocess.run(
+            [exe, "agent-savings", "--profile", profile, "--format", "json"],
+            capture_output=True, timeout=10, text=True,
+        )
+    except Exception as e:
+        raise HeadroomUnavailable(f"headroom agent-savings failed ({e.__class__.__name__}: {e})")
+    if res.returncode != 0 or not res.stdout.strip():
+        tail = (res.stderr or res.stdout or "").strip().splitlines()
+        raise HeadroomUnavailable(
+            f"headroom agent-savings --profile {profile}: {tail[-1] if tail else '(no output)'}"
+        )
+    return {str(k): str(v) for k, v in json.loads(res.stdout).items()}
 
 
 def proxy_health(port: int) -> dict:
@@ -178,7 +148,7 @@ def proxy_down(port: int) -> Tuple[bool, str]:
 
 
 def version() -> Optional[str]:
-    """Diagnostic: installed `headroom --version` (for the doctor drift check)."""
+    """Diagnostic: installed `headroom --version` (for the pin drift check)."""
     exe = _headroom()
     if not exe:
         return None
@@ -186,6 +156,22 @@ def version() -> Optional[str]:
         res = subprocess.run([exe, "--version"], capture_output=True, timeout=5, text=True)
         m = re.search(r"(\d+\.\d+\.\d+)", (res.stdout or "") + (res.stderr or ""))
         return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def latest_version(package: str = "headroom-ai") -> Optional[str]:
+    """The newest published version of `package`, straight from the PyPI JSON API.
+
+    Resolving the target *before* installing keeps the exact-pin invariant intact: we still
+    record and install `==<version>`, never a floating constraint. Returns None if PyPI is
+    unreachable or the payload is unshaped, so the caller can fail loud rather than guess.
+    """
+    url = f"https://pypi.org/pypi/{package}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            v = json.loads(r.read().decode()).get("info", {}).get("version")
+        return str(v) if v else None
     except Exception:
         return None
 
@@ -204,37 +190,35 @@ def _run(args: list, timeout: int = 30) -> tuple:
 
 
 def version_tuple(v: Optional[str]) -> tuple:
-    """Parse 'X.Y.Z' to a comparable tuple; () for unknown/unparseable."""
-    if not v:
-        return ()
-    try:
-        return tuple(int(x) for x in v.split(".")[:3])
-    except ValueError:
-        return ()
+    """Back-compat re-export; canonical parser lives in `versions`."""
+    from ..versions import version_tuple as _vt
+
+    return _vt(v)
 
 
-def upgrade() -> Tuple[bool, str, Optional[str], Optional[str]]:
-    """Upgrade headroom to the latest allowed by the uv tool constraint (>=MIN_VERSION).
+def install(requirement: str) -> Tuple[bool, str, Optional[str], Optional[str]]:
+    """Install an exact headroom requirement (e.g. 'headroom-ai[proxy]==0.29.0').
 
-    Returns (ok, detail, before, after). No-op-safe if uv/headroom is missing.
+    Replaces the old `upgrade()`, which shelled out to `uv tool upgrade` and therefore
+    resolved to whatever was newest that day. Returns (ok, detail, before, after).
     """
     before = version()
     if not shutil.which("uv"):
-        return (False, "uv not on PATH — upgrade headroom manually", before, before)
+        return (False, "uv not on PATH — install headroom manually", before, before)
     try:
         res = subprocess.run(
-            ["uv", "tool", "upgrade", "headroom-ai"],
-            capture_output=True, timeout=300, text=True,
+            ["uv", "tool", "install", requirement, "--force"],
+            capture_output=True, timeout=600, text=True,
         )
     except Exception as e:
-        return (False, f"upgrade failed ({e.__class__.__name__}: {e})", before, before)
+        return (False, f"install failed ({e.__class__.__name__}: {e})", before, before)
     after = version()
     if res.returncode != 0:
         tail = (res.stderr or res.stdout or "").strip().splitlines()
-        return (False, tail[-1] if tail else "uv tool upgrade failed", before, after)
+        return (False, tail[-1] if tail else "uv tool install failed", before, after)
     if before == after:
-        return (True, f"already latest ({after})", before, after)
-    return (True, f"upgraded {before} → {after}", before, after)
+        return (True, f"already at {after}", before, after)
+    return (True, f"{before or 'none'} → {after}", before, after)
 
 
 def mcp_uninstall() -> tuple:

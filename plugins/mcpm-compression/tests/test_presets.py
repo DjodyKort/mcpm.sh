@@ -1,20 +1,16 @@
-"""Preset model + policy→env mapping tests (no live headroom, no network)."""
+"""Preset model + policy→env rendering (no live headroom, no network)."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from mcpm_compression.providers import get_provider
-from mcpm_compression.providers import headroom_runtime as hr
 from mcpm_compression.schema import (
     AGENT_PORT,
+    DEFAULT_PIN,
     DEFAULT_PORT,
     CompressionConfig,
     CompressionPreset,
     ContextRule,
+    KnobSpec,
 )
-
-_FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test01_default_presets_present():
@@ -25,7 +21,6 @@ def test01_default_presets_present():
     agent = cfg.presets["agent"]
     assert agent.mode == "token" and agent.savings_profile == "agent-90"
     assert agent.port == AGENT_PORT  # separate port → can run alongside interactive
-    assert agent.intercept_tool_results is False  # A/B knob defaults OFF
 
 
 def test02_resolve_returns_provider_and_preset():
@@ -37,25 +32,25 @@ def test02_resolve_returns_provider_and_preset():
             ContextRule(match="*/agent-batch/*", preset="agent"),
         ],
     )
-    assert cfg.resolve("/Users/x/clients/acme") == ("none", "interactive")  # provider override, preset default
-    assert cfg.resolve("/Users/x/agent-batch/run") == ("headroom", "agent")  # preset override, provider default
-    assert cfg.resolve("/Users/x/personal") == ("headroom", "interactive")  # both default
-    # back-compat shim
+    assert cfg.resolve("/Users/x/clients/acme") == ("none", "interactive")
+    assert cfg.resolve("/Users/x/agent-batch/run") == ("headroom", "agent")
+    assert cfg.resolve("/Users/x/personal") == ("headroom", "interactive")
     assert cfg.resolved_provider("/Users/x/clients/acme") == "none"
 
 
 def test03_env_for_preset_layers_mode_and_base_url():
     cfg = CompressionConfig(provider="headroom", telemetry="off")
     hp = get_provider("headroom")
-    agent = CompressionPreset(mode="token", savings_profile="agent-90",
-                              env=dict(hr._FALLBACK_PROFILE_ENV["agent-90"]),
-                              intercept_tool_results=True, port=AGENT_PORT)
+    agent = CompressionPreset(
+        mode="token", savings_profile="agent-90", port=AGENT_PORT,
+        knobs={"HEADROOM_SAVINGS_PROFILE": KnobSpec(value="agent-90"),
+               "HEADROOM_MODE": KnobSpec(value="token")},
+    )
     env = hp.env_for_preset(cfg, agent)
     assert env["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{AGENT_PORT}"
     assert env["ENABLE_TOOL_SEARCH"] == "true"
-    assert env["HEADROOM_MODE"] == "token"           # preset.mode authoritative
-    assert env["HEADROOM_SAVINGS_PROFILE"] == "agent-90"   # from the snapshot
-    assert env["HEADROOM_INTERCEPT_ENABLED"] == "1"  # read-outliner on
+    assert env["HEADROOM_MODE"] == "token"
+    assert env["HEADROOM_SAVINGS_PROFILE"] == "agent-90"
     assert env["HEADROOM_TELEMETRY"] == "off"
 
 
@@ -63,34 +58,56 @@ def test04_preset_mode_overrides_snapshot_mode():
     # A cache preset that (oddly) seeds a token profile still launches in cache.
     cfg = CompressionConfig(provider="headroom")
     hp = get_provider("headroom")
-    p = CompressionPreset(mode="cache", env={"HEADROOM_MODE": "token"})
+    p = CompressionPreset(mode="cache", knobs={"HEADROOM_MODE": KnobSpec(value="token")})
     assert hp.env_for_preset(cfg, p)["HEADROOM_MODE"] == "cache"
 
 
-def test05_fallback_constant_matches_captured_fixtures():
-    # The runtime fallback must stay in lock-step with the captured 0.26.0 contract.
-    for profile in ("agent-90", "balanced"):
-        fixture = json.loads((_FIXTURES / f"agent_savings_{profile}.json").read_text())
-        assert hr._FALLBACK_PROFILE_ENV[profile] == fixture
+def test05_declared_off_knob_is_emitted_explicitly():
+    """F3 regression.
+
+    The old code layered HEADROOM_CODE_AWARE_ENABLED only when code_aware was true, so a
+    declared `false` could never turn off a knob the vendor's snapshot had set to "1" —
+    and from 0.30 headroom seeds a default into any knob left unset. "Off" must therefore
+    be an explicit "0" on the wire, never an absent key.
+    """
+    cfg = CompressionConfig(provider="headroom")
+    hp = get_provider("headroom")
+    p = CompressionPreset(knobs={"HEADROOM_CODE_AWARE_ENABLED": KnobSpec(value="0")})
+    env = hp.env_for_preset(cfg, p)
+    assert env["HEADROOM_CODE_AWARE_ENABLED"] == "0"
 
 
-def test06_snapshot_profile_env_falls_back_without_binary(monkeypatch=None):
-    # When headroom isn't on PATH, snapshot returns the captured constant.
-    import mcpm_compression.providers.headroom_runtime as mod
-    orig = mod._headroom
-    mod._headroom = lambda: None
-    try:
-        assert mod.snapshot_profile_env("agent-90") == mod._FALLBACK_PROFILE_ENV["agent-90"]
-        assert mod.snapshot_profile_env("nonexistent") == {}
-    finally:
-        mod._headroom = orig
+def test06_knobs_are_gated_by_the_pin():
+    """A knob restricted to >=0.31 must not be emitted on a 0.29 pin.
+
+    Measured: 0.29 never reads HEADROOM_PROTECT_READS, so declaring it there would claim a
+    read-safety property the build does not honour.
+    """
+    hp = get_provider("headroom")
+    p = CompressionPreset(knobs={
+        "HEADROOM_PROTECT_READS": KnobSpec(value="1", applies=">=0.31.0"),
+        "HEADROOM_MODE": KnobSpec(value="cache"),
+    })
+    on_29 = hp.env_for_preset(CompressionConfig(provider="headroom"), p)  # pin defaults to 0.29
+    assert "HEADROOM_PROTECT_READS" not in on_29
+
+    cfg31 = CompressionConfig(provider="headroom")
+    cfg31.provider_version.pin = "0.31.0"
+    assert hp.env_for_preset(cfg31, p)["HEADROOM_PROTECT_READS"] == "1"
 
 
 def test07_interactive_preset_has_no_savings_env():
-    # cache-mode interactive needs no agent-savings snapshot.
     cfg = CompressionConfig(provider="headroom")
     hp = get_provider("headroom")
     env = hp.env_for_preset(cfg, cfg.preset_for("interactive"))
     assert env["HEADROOM_MODE"] == "cache"
     assert env["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{DEFAULT_PORT}"
     assert "HEADROOM_SAVINGS_PROFILE" not in env
+
+
+def test08_pin_is_exact_never_a_floor():
+    pv = CompressionConfig().provider_version
+    assert pv.pin == DEFAULT_PIN
+    req = pv.requirement()
+    assert "==" in req and ">=" not in req
+    assert req.startswith("headroom-ai[")

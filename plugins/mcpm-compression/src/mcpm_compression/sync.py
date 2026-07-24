@@ -41,21 +41,35 @@ def _resolved_path(p):
 
 
 def _materialize_presets(config: CompressionConfig, report: ApplyReport) -> None:
-    """Fill empty preset env snapshots from headroom (config-time only, never the launch
-    path). Skipped entirely when no headroom routing is configured. Falls back to the
-    captured constant when headroom isn't on PATH, so config writes never fail."""
+    """Fill empty preset knob snapshots from the pinned headroom build (config-time only,
+    never the launch path). Skipped entirely when no headroom routing is configured.
+
+    Only fills what is empty — an existing snapshot is never silently rewritten here, since
+    `apply` runs on unrelated edits. Re-snapshotting is an explicit act (`presets --refresh`)
+    so a knob change always has a diff and a decision behind it.
+    """
     routes_headroom = config.provider == "headroom" or any(
         (rule.provider or config.provider) == "headroom" for rule in config.contexts
     )
     if not routes_headroom:
         return
-    from .providers.headroom_runtime import snapshot_profile_env
+    from .providers.headroom_runtime import HeadroomUnavailable, snapshot_profile_env, version
+    from .schema import KnobSpec
 
     for name, preset in config.presets.items():
-        if preset.savings_profile and not preset.env:
-            preset.env = snapshot_profile_env(preset.savings_profile)
-            if preset.env:
-                report.add(f"snapshot preset '{name}' env (headroom profile '{preset.savings_profile}')")
+        if not preset.savings_profile or preset.knobs:
+            continue
+        try:
+            env = snapshot_profile_env(preset.savings_profile)
+        except HeadroomUnavailable as e:
+            # No fallback constant by design: guessing is what let one preset name mean two
+            # different runtimes depending on whether the binary was on PATH.
+            report.warn(f"preset '{name}': {e}")
+            continue
+        preset.knobs = {k: KnobSpec(value=v, source="profile") for k, v in env.items()}
+        preset.snapshot_version = version()
+        report.add(f"snapshot preset '{name}' knobs from headroom {preset.snapshot_version} "
+                   f"(profile '{preset.savings_profile}')")
 
 
 def _remove_managed_artifacts(report: ApplyReport) -> None:

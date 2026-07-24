@@ -20,13 +20,68 @@ DEFAULT_PORT = 8787
 # alongside the cache-mode interactive proxy (mode is cold-start per process).
 AGENT_PORT = 8788
 
+# The headroom version we build and verify against. Exact, never a floor: upstream ships
+# ~2 releases/week and 0.30 started seeding a default persona into any unset knob, so a
+# floating constraint silently rewrites the runtime. 0.29.0 predates that seeding and
+# carries the cross-request cache-contamination fix (headroom#1473).
+DEFAULT_PIN = "0.29.0"
+
+
+class ProviderVersion(BaseModel):
+    """The exact provider build this policy was written against.
+
+    `pin` is an exact version — the uv constraint is `==pin`, never `>=`. Bumping it is a
+    reviewed act (`mcpm compression update --to X --accept`), never a side effect.
+    """
+
+    package: str = "headroom-ai"
+    pin: str = DEFAULT_PIN
+    extras: List[str] = Field(default_factory=lambda: ["proxy", "code", "ml"])
+
+    def requirement(self) -> str:
+        extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        return f"{self.package}{extras}=={self.pin}"
+
+
+KnobSource = Literal["profile", "policy"]
+
+
+class KnobSpec(BaseModel):
+    """One declared `HEADROOM_*` value, optionally restricted to a version range.
+
+    `applies` is *authored* intent ("only mean this from 0.31 on"); the default `*` means
+    "emit on every pin". It is deliberately NOT the same thing as whether the pinned binary
+    reads the knob — that is measured (`headroom_capability`) and only ever reported, never
+    used to drop a knob from the emit path. Emitting a knob a build ignores is inert;
+    dropping one it reads would silently change behaviour.
+
+    `source` says who owns the value:
+
+    - `profile` — captured from `headroom agent-savings`. A re-snapshot replaces it.
+    - `policy`  — *our* declaration (e.g. code_aware off). A re-snapshot must preserve it,
+      and it wins over any profile value for the same knob.
+
+    The default is `policy` because that is the fail-safe direction: failing to refresh a
+    value is recoverable, silently deleting a declaration is not. A re-snapshot that drops
+    a `policy` knob hands it straight back to the vendor's default — which is the whole
+    failure this schema exists to prevent.
+    """
+
+    value: str
+    applies: str = "*"
+    source: KnobSource = "policy"
+
 
 class CompressionPreset(BaseModel):
     """A named bundle of headroom knobs.
 
-    `env` is a config-time *snapshot* of the `HEADROOM_*` bundle (seeded from
-    `headroom agent-savings <savings_profile>`), so the launch path reads config only
-    and never shells out. `mode` is authoritative and layered last over `env`.
+    `knobs` is a config-time *snapshot* of the `HEADROOM_*` bundle (seeded from
+    `headroom agent-savings <savings_profile>`), so the launch path reads config only and
+    never shells out. `mode` is authoritative and layered last.
+
+    Every knob mcpm cares about is declared explicitly, including the offs. headroom seeds
+    its own persona defaults into anything left unset (`setdefault` semantics), so an
+    undeclared knob is a knob the vendor owns — and silently re-owns on upgrade.
 
     Presets meant to run *simultaneously* per-context (e.g. agent vs interactive) need
     distinct `port`s — a single proxy process is one mode, fixed at cold-start.
@@ -34,9 +89,9 @@ class CompressionPreset(BaseModel):
 
     mode: CompressionMode = "cache"
     savings_profile: Optional[str] = None
-    env: Dict[str, str] = Field(default_factory=dict)
-    intercept_tool_results: bool = False  # headroom --intercept-tool-results (Read outliner)
-    code_aware: bool = False
+    knobs: Dict[str, KnobSpec] = Field(default_factory=dict)
+    # Which headroom version produced `knobs`. None = never snapshotted (doctor warns).
+    snapshot_version: Optional[str] = None
     port: int = DEFAULT_PORT
 
 
@@ -75,6 +130,8 @@ class CompressionConfig(BaseModel):
     provider: ProviderName = "none"
     # Resolved from the provider when omitted; explicit override allowed.
     runtime: RuntimeKind = "none"
+    # The exact provider build this policy targets.
+    provider_version: ProviderVersion = Field(default_factory=ProviderVersion)
     scope: List[str] = Field(default_factory=lambda: ["default"])
     # mcpm ClientRegistry keys to propagate MCP presence to (e.g. "claude-code").
     clients: List[str] = Field(default_factory=lambda: ["claude-code"])

@@ -6,24 +6,34 @@ import shutil
 
 import click
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
-from .config import load_config, save_config
+from .capability import (
+    effective_config as cap_effective,
+    inert_for as cap_inert,
+    split_unsealed,
+    unsealed_for as cap_unsealed,
+)
+from .config import load_config, load_config_verbose, save_config
+from .ledger import append_launch
 from .mcp_presence import in_client, is_present, present_entry
 from .providers import get_provider, provider_names
 from .providers.headroom_runtime import (
-    CONTRACT_VERSION,
+    HeadroomUnavailable,
+    install as hr_install,
+    latest_version as hr_latest,
     proxy_down as hr_proxy_down,
     proxy_up as hr_proxy_up,
     snapshot_profile_env,
-    upgrade as hr_upgrade,
     version as hr_version,
-    version_tuple,
 )
 from .runtime import LAUNCHD_LABEL, launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH, SHIMS_PATH
-from .schema import DEFAULT_PORT
+from .schema import DEFAULT_PORT, KnobSpec
 from .sync import apply, disable as do_disable
+from .versions import version_tuple
+from .verify import compare, iter_transcripts, measure, partition, schema_ok
 
 console = Console()
 err = Console(stderr=True)
@@ -66,17 +76,17 @@ def status() -> None:
     if health.get("version"):
         table.add_row("version", str(health["version"]))
     if config.provider == "headroom":
+        pin = config.provider_version.pin
         v = hr_version()
         if not v:
-            table.add_row("headroom", "[yellow]not on PATH[/]")
-        elif version_tuple(v) < version_tuple(CONTRACT_VERSION):
-            table.add_row("headroom", f"[yellow]{v} — below contract {CONTRACT_VERSION}; "
-                          f"run `mcpm compression update`[/]")
-        elif v == CONTRACT_VERSION:
-            table.add_row("headroom", f"{v} (contract {CONTRACT_VERSION})")
+            table.add_row("headroom", f"[yellow]not on PATH (pin {pin})[/]")
+        elif v == pin:
+            table.add_row("headroom", f"[green]{v}[/] (pinned)")
         else:
-            table.add_row("headroom", f"{v} (newer than contract {CONTRACT_VERSION}; "
-                          "`update` re-syncs if needed)")
+            # Any mismatch is drift — including newer. "Newer" is unverified, not fine:
+            # 0.31 was newer than 0.27 and shipped a measured cache-busting regression.
+            table.add_row("headroom", f"[red]{v} ≠ pin {pin}[/] — run "
+                          f"[cyan]mcpm compression pin --install[/]")
     desired = provider.mcp_server_config(config)
     mcp_name = desired["name"] if desired else None
     if mcp_name:
@@ -183,48 +193,293 @@ def use_preset(preset_name: str) -> None:
     console.print("  Note: mode is fixed at proxy cold-start — restart the proxy to apply a mode change.")
 
 
-@compression.command(help="List presets (optionally re-snapshot their headroom env).")
-@click.option("--refresh", is_flag=True, help="Re-snapshot each preset's env from `headroom agent-savings`.")
+@compression.command(help="List presets (optionally re-snapshot their knobs from the pinned binary).")
+@click.option("--refresh", is_flag=True, help="Re-snapshot each preset's knobs from `headroom agent-savings`.")
 def presets(refresh: bool) -> None:
     config = load_config()
     if refresh:
-        for p in config.presets.values():
-            if p.savings_profile:
-                p.env = snapshot_profile_env(p.savings_profile)
-        save_config(config)
-        console.print("[green]re-snapshotted preset env from headroom[/]")
+        _refresh_snapshots(config)
     table = Table(show_header=True, box=None)
-    for col in ("", "preset", "mode", "savings", "port", "read-outliner"):
+    for col in ("", "preset", "mode", "savings", "port", "knobs", "snapshot"):
         table.add_column(col)
     for name, p in config.presets.items():
         table.add_row("●" if name == config.active_preset else "",
                       name, p.mode, p.savings_profile or "—", str(p.port),
-                      "on" if p.intercept_tool_results else "off")
+                      str(len(p.knobs)),
+                      p.snapshot_version or "[yellow]unknown[/]")
     console.print(table)
 
 
-@compression.command(help="Upgrade headroom to latest, then re-snapshot the preset env from the new binary.")
-def update() -> None:
-    console.print("[bold]Updating headroom[/]")
-    ok, detail, before, after = hr_upgrade()
-    (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]"
-                                         f"{'✓' if ok else '✗'}[/] {detail}")
-    if not ok:
-        return
-    # Re-derive the preset env from the (possibly new) binary so config stays truthful.
+@compression.command(help="Show or set the exact headroom pin (and optionally install it).")
+@click.argument("version", required=False)
+@click.option("--install", "do_install", is_flag=True,
+              help="Install the pinned build exactly (uv tool install ==<pin> --force).")
+@click.option("--refresh", is_flag=True,
+              help="Re-snapshot preset knobs from the pinned binary after installing.")
+def pin(version: str | None, do_install: bool, refresh: bool) -> None:
     config = load_config()
-    for p in config.presets.values():
-        if p.savings_profile:
-            p.env = snapshot_profile_env(p.savings_profile)
-    save_config(config)
-    console.print("  [green]✓[/] re-snapshotted preset env from headroom")
-    if after and after != CONTRACT_VERSION:
-        console.print(f"  [dim]note: running {after}; bundled contract/fixtures captured at "
-                      f"{CONTRACT_VERSION}. Live snapshot is authoritative; refresh fixtures if you "
-                      f"maintain the plugin.[/]")
+    pv = config.provider_version
+
+    if version:
+        pv.pin = version
+        save_config(config)
+        # escape(): the extras marker reads as Rich markup and would be swallowed, leaving
+        # a requirement that installs headroom without its proxy.
+        console.print(f"[bold]Pin → {version}[/]  (requirement: [cyan]{escape(pv.requirement())}[/])")
+        console.print("  [dim]presets still hold values snapshotted from another build — "
+                      "re-snapshot with `--install --refresh`.[/]")
+
+    live = hr_version()
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_row("pin", f"[bold]{pv.pin}[/]")
+    table.add_row("requirement", escape(pv.requirement()))
+    table.add_row("installed", live or "[yellow]not on PATH[/]")
+    if live and live != pv.pin:
+        table.add_row("", "[red]drift — installed ≠ pin[/]")
+    console.print(table)
+
+    if not do_install:
+        if live and live != pv.pin:
+            console.print("\n  Install the pin: [cyan]mcpm compression pin --install --refresh[/]")
+        return
+
+    console.print(f"\n[bold]Installing {escape(pv.requirement())}[/]")
+    ok, detail, before, after = hr_install(pv.requirement())
+    (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]{'✓' if ok else '✗'}[/] {detail}")
+    if not ok:
+        raise SystemExit(1)
+    if refresh:
+        _refresh_snapshots(config)
     if before != after:
-        console.print("  • restart proxies to run the new binary: [cyan]mcpm compression proxy restart[/] "
-                      "(close attached sessions first)")
+        console.print("  • restart proxies to run the pinned build: "
+                      "[cyan]mcpm compression proxy restart[/] (close attached sessions first)")
+
+
+def _refresh_snapshots(config) -> None:
+    """Re-snapshot every profile-backed preset from the installed binary.
+
+    Only `profile`-sourced knobs are replaced. Our own declarations (`policy`) survive and
+    win — a re-snapshot that dropped them would hand those knobs back to the vendor's
+    default, which is exactly the drift the pin exists to stop. Raises rather than
+    inventing a snapshot when the binary is unavailable.
+    """
+    live = hr_version()
+    changed = 0
+    for name, preset in config.presets.items():
+        if not preset.savings_profile:
+            continue
+        try:
+            env = snapshot_profile_env(preset.savings_profile)
+        except HeadroomUnavailable as e:
+            err.print(f"  [red]✗[/] preset '{name}': {e}")
+            raise SystemExit(1)
+        before = {k: s.value for k, s in preset.knobs.items()}
+        kept = {k: s for k, s in preset.knobs.items() if s.source == "policy"}
+        merged = {k: KnobSpec(value=v, source="profile") for k, v in env.items()}
+        merged.update(kept)  # our declarations outrank the vendor's profile
+        preset.knobs = merged
+        preset.snapshot_version = live
+
+        after = {k: s.value for k, s in merged.items()}
+        added = set(after) - set(before)
+        removed = set(before) - set(after)
+        moved = {k for k in set(after) & set(before) if after[k] != before[k]}
+        if added or removed or moved:
+            changed += 1
+            console.print(f"  [green]✓[/] preset '{name}' re-snapshotted from {live}")
+            for k in sorted(added):
+                console.print(f"      [green]+[/] {k}={after[k]}")
+            for k in sorted(removed):
+                console.print(f"      [red]-[/] {k}  [dim](was {before[k]})[/]")
+            for k in sorted(moved):
+                console.print(f"      [yellow]~[/] {k}: {before[k]} → {after[k]}")
+        if kept:
+            console.print(f"      [dim]kept {len(kept)} declared knob(s): "
+                          f"{', '.join(sorted(kept))}[/]")
+    save_config(config)
+    if not changed:
+        console.print(f"  [green]✓[/] preset knobs already match {live}")
+
+
+@compression.command(help="Bump the pin to a target build (or the newest published one), install it, and re-snapshot.")
+@click.option("--to", "to_version", metavar="VERSION",
+              help="Bump to this exact version (e.g. 0.31.0).")
+@click.option("--latest", "to_latest", is_flag=True,
+              help="Resolve the newest published headroom-ai from PyPI and bump to it.")
+@click.option("--accept", is_flag=True,
+              help="Actually move the pin, install, and re-snapshot. Without it this only previews.")
+def update(to_version: str | None, to_latest: bool, accept: bool) -> None:
+    """Move the exact pin deliberately — the one sanctioned path off the current build.
+
+    A bare `update` (or `--latest`) resolves the newest published build; `--to` names one.
+    Either way the target becomes an *exact* pin (`==<version>`), so the config still says
+    which build it describes — the invariant the whole pinning stance rests on. `--accept`
+    gates the mutation, so `hrupdate` can be one keystroke while a stray invocation only
+    previews.
+    """
+    if to_version and to_latest:
+        err.print("[red]✗[/] pass either --to or --latest, not both")
+        raise SystemExit(2)
+
+    config = load_config()
+    pv = config.provider_version
+    current = pv.pin
+
+    # No explicit target means "newest" — that is what auto-detection buys.
+    if to_version:
+        target = to_version
+    else:
+        console.print("[dim]Resolving newest headroom-ai from PyPI…[/]")
+        target = hr_latest(pv.package)
+        if not target:
+            err.print("[red]✗[/] could not resolve the latest version from PyPI "
+                      "(offline?). Name it explicitly: [cyan]mcpm compression update --to X[/]")
+            raise SystemExit(1)
+
+    if not version_tuple(target):
+        err.print(f"[red]✗[/] '{target}' is not a parseable X.Y.Z version")
+        raise SystemExit(2)
+
+    same = target == current
+    console.print(f"[bold]Update pin[/]  "
+                  f"{'already pinned at ' + target if same else current + ' → ' + target}")
+    # Newest is unverified against the recorded fixtures/contract by construction — the
+    # reason the pin exists. Surface it every time, then let verify be the arbiter.
+    console.print("  [yellow]![/] this build is unverified against the recorded contract — "
+                  "run [cyan]mcpm compression verify[/] after, and sanity-check the savings.")
+
+    if not accept:
+        console.print("\n  [dim]preview only — re-run with [cyan]--accept[/] "
+                      "to move the pin, install, and re-snapshot.[/]")
+        return
+
+    pv.pin = target
+    save_config(config)
+    console.print(f"\n[bold]Installing {escape(pv.requirement())}[/]")
+    ok, detail, before, after = hr_install(pv.requirement())
+    (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]{'✓' if ok else '✗'}[/] {detail}")
+    if not ok:
+        raise SystemExit(1)
+    _refresh_snapshots(config)
+    if before != after:
+        console.print("  • restart proxies to run the new build: "
+                      "[cyan]mcpm compression proxy restart[/] (close attached sessions first)")
+
+
+@compression.command(help="Declare the posture a live proxy is running, so an upgrade can't move it.")
+@click.argument("preset_name", required=False)
+@click.option("--apply", "do_apply", is_flag=True, help="Write the captured posture into policy.")
+def seal(preset_name: str | None, do_apply: bool) -> None:
+    """Capture `/health.config` from the running proxy into `policy` knobs.
+
+    Behaviour-preserving by construction: it declares what the proxy is *already* running,
+    so sealing changes nothing today — it only stops a future build from quietly deciding
+    differently. Settings reported as unset (`None`) are headroom's own internal defaults
+    and cannot be expressed as env, so they are listed, never invented.
+    """
+    config = load_config()
+    name = preset_name or config.active_preset
+    if name not in config.presets:
+        err.print(f"[red]unknown preset {name!r}[/] (have: {', '.join(config.presets)})")
+        raise SystemExit(1)
+    preset = config.presets[name]
+
+    if not cap_effective(preset.port):
+        err.print(f"  [red]✗[/] no proxy on :{preset.port} — start one first "
+                  f"([cyan]mcpm compression proxy up[/]). /health is the only truthful "
+                  f"source for what a build actually runs.")
+        raise SystemExit(1)
+
+    declarable, unset = split_unsealed(cap_unsealed(preset.knobs, preset.port))
+    if not declarable and not unset:
+        console.print(f"  [green]✓[/] preset '{name}' already declares its whole posture")
+        return
+
+    console.print(f"[bold]Posture of '{name}' on :{preset.port} (headroom {hr_version()})[/]")
+    for k, v in sorted(declarable.items()):
+        console.print(f"  [green]+[/] {k}={v}   [dim]vendor default → would become policy[/]")
+    for k, v in sorted(unset.items()):
+        console.print(f"  [dim]·[/] {k}  [dim]unset — headroom's internal default; not "
+                      f"expressible as env, stable only because the build is pinned[/]")
+
+    if not do_apply:
+        console.print(f"\n  {len(declarable)} declarable, {len(unset)} unsealable. "
+                      f"Apply with [cyan]mcpm compression seal {name} --apply[/]")
+        return
+    for k, v in declarable.items():
+        preset.knobs[k] = KnobSpec(value=v, source="policy")
+    save_config(config)
+    console.print(f"\n  [green]✓[/] sealed {len(declarable)} knob(s) into '{name}' as policy "
+                  f"(runtime unchanged — these are the values already in force)")
+    if unset:
+        console.print(f"  [dim]{len(unset)} setting(s) remain at headroom's internal default; "
+                      f"a pin bump will diff them.[/]")
+
+
+@compression.command(help="Measure real prompt-cache behaviour from Claude Code's own transcripts.")
+@click.option("--limit", type=int, default=None, help="Only the N most recent sessions.")
+@click.option("--min-turns", type=int, default=5, show_default=True,
+              help="Ignore sessions with fewer billed turns.")
+def verify(limit: int | None, min_turns: int) -> None:
+    paths = list(iter_transcripts())
+    if limit:
+        paths = paths[:limit]
+    if not paths:
+        err.print("  [yellow]![/] no Claude Code transcripts found — nothing to measure")
+        raise SystemExit(1)
+    if not schema_ok(paths):
+        # Skip loudly. Zeros here would read as a total cache collapse rather than a
+        # field Claude Code stopped writing.
+        err.print("  [red]✗[/] transcripts carry no cache_* usage fields — Claude Code's "
+                  "format may have changed. Refusing to report a number.")
+        raise SystemExit(1)
+
+    buckets = partition(paths)
+    metrics = {k: measure(v, min_turns=min_turns) for k, v in buckets.items()}
+    proxied, plain, unattr = metrics["proxied"], metrics["plain"], metrics["unattributed"]
+
+    table = Table(show_header=True, box=None)
+    for col in ("bucket", "sessions", "turns", "read ratio", "read:write"):
+        table.add_column(col)
+    for label, m, note in (
+        ("proxied", proxied, "through headroom"),
+        ("plain", plain, "control — run, not routed"),
+        ("unattributed", unattr, "baseline — predates the ledger"),
+    ):
+        if not m.sessions:
+            table.add_row(f"[dim]{label}[/]", "[dim]—[/]", "[dim]—[/]", "[dim]—[/]",
+                          f"[dim]{note}[/]")
+            continue
+        table.add_row(label, f"{m.sessions:,}", f"{m.turns:,}",
+                      f"[bold]{m.read_ratio:.1%}[/]" if m.read_ratio is not None else "—",
+                      f"[bold]{m.read_write:.2f}x[/]" if m.read_write is not None else "—")
+    console.print(table)
+
+    if not proxied.sessions:
+        console.print("\n  [yellow]![/] no proxied sessions yet — nothing to judge. "
+                      "Enable headroom, work through [cyan]hrclaude[/], then re-run.")
+        console.print(f"  [dim]baseline for comparison: "
+                      f"{unattr.read_ratio:.1%} read ratio, {unattr.read_write:.2f}x "
+                      f"over {unattr.sessions:,} sessions.[/]"
+                      if unattr.read_ratio is not None else "")
+        return
+
+    ok, detail = proxied.verdict()
+    console.print(f"\n  [{'green' if ok else 'red'}]{'✓ pass' if ok else '✗ fail'}[/] "
+                  f"proxied — {detail}")
+    # The comparison is the point: an absolute ratio means little without the counterfactual.
+    for label, base in (("plain", plain), ("baseline", unattr)):
+        delta = compare(base, proxied)
+        if delta is None:
+            continue
+        colour = "green" if delta >= -1 else "red"
+        console.print(f"  vs {label}: [{colour}]{delta:+.1f} pp[/] read ratio "
+                      f"[dim]({base.read_ratio:.1%} → {proxied.read_ratio:.1%})[/]")
+    console.print("  [dim]source: provider-billed usage in Claude Code transcripts — "
+                  "never headroom's own /stats (its accounting was wrong four ways across "
+                  "0.28–0.31).[/]")
+    if not ok:
+        raise SystemExit(1)
 
 
 @compression.command(help="Re-apply the current config (idempotent reconcile).")
@@ -236,18 +491,62 @@ def sync() -> None:
 
 @compression.command(help="Diagnose the setup (binaries, port, config sanity).")
 def doctor() -> None:
-    config = load_config()
+    config, notes = load_config_verbose()
+    for n in notes:
+        console.print(f"  [cyan]migrated[/] {n}")
     checks = []
     checks.append(("headroom binary", shutil.which("headroom") is not None,
                    shutil.which("headroom") or "not on PATH"))
     checks.append(("rtk binary", shutil.which("rtk") is not None,
                    shutil.which("rtk") or "not on PATH (optional)"))
+    pin = config.provider_version.pin
     if shutil.which("headroom"):
         v = hr_version()
-        # OK as long as we're at or above the contract version (newer is fine — we track latest).
-        ok_ver = bool(v) and version_tuple(v) >= version_tuple(CONTRACT_VERSION)
-        checks.append(("headroom version", ok_ver,
-                       f"{v} (contract {CONTRACT_VERSION})" if v else "unknown"))
+        # Exact match only. "Newer" is unverified, not fine — 0.31 was newer than the old
+        # 0.27 contract and shipped a measured cache-busting regression that this check,
+        # written as `>=`, reported as ok.
+        checks.append(("headroom version", v == pin,
+                       f"{v} == pin {pin}" if v == pin
+                       else f"{v or 'unknown'} ≠ pin {pin} — run `pin --install`"))
+    # Provenance: a preset whose knobs came from an unknown build is a preset whose
+    # behaviour nobody can predict.
+    stale = [n for n, p in config.presets.items()
+             if p.savings_profile and p.snapshot_version != pin]
+    checks.append(("preset provenance", not stale,
+                   "all snapshots match the pin" if not stale
+                   else f"snapshotted from another build: {', '.join(stale)} — `presets --refresh`"))
+
+    # Inert: we declare it, the pinned build never reads it. headroom's own agent-savings
+    # emits two such knobs, so this is not hypothetical.
+    inert_all = {}
+    for name, preset in config.presets.items():
+        for knob, alt in cap_inert(preset.knobs).items():
+            inert_all.setdefault(knob, (alt, []))[1].append(name)
+    if inert_all:
+        detail = "; ".join(
+            f"{k} ({', '.join(v[1])}) → {v[0] or 'no equivalent'}" for k, v in inert_all.items()
+        )
+        checks.append(("inert knobs", False, f"declared but never read: {detail}"))
+    else:
+        checks.append(("inert knobs", True, "every declared knob is read by this build"))
+
+    # Unsealed: the live proxy holds a posture value we never declared, i.e. the vendor is
+    # deciding it. Needs a running proxy — /health is the only truthful source.
+    port = config.preset_for().port
+    live_cfg = cap_effective(port)
+    if not live_cfg:
+        checks.append(("sealed posture", True,
+                       f"no proxy on :{port} — start one and re-run to audit the live posture"))
+    else:
+        declarable, unset = split_unsealed(cap_unsealed(config.preset_for().knobs, port))
+        # Only `declarable` is actionable. `unset` is headroom's internal default, which no
+        # env value can express — warning about it forever would be noise you can't clear.
+        note = ("vendor-decided, declarable: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(declarable.items()))
+                + " — run `seal --apply`") if declarable else "every declarable knob is policy"
+        if unset:
+            note += f"; {len(unset)} at headroom's internal default (unsealable, pinned)"
+        checks.append(("sealed posture", not declarable, note))
     health = get_provider(config.provider).health(config)
     checks.append(("engine reachable", bool(health.get("ok")), health.get("detail", "")))
     desired = get_provider(config.provider).mcp_server_config(config)
@@ -311,23 +610,62 @@ def env_cmd(cwd: str) -> None:
     context_settings=dict(ignore_unknown_options=True),
 )
 @click.option("--cwd", "cwd", default=None, help="Directory to resolve the policy for.")
+@click.option("--force", is_flag=True,
+              help="Route even when the installed build doesn't match the pin.")
 @click.argument("claude_args", nargs=-1, type=click.UNPROCESSED)
-def run(cwd: str, claude_args: tuple) -> None:
+def run(cwd: str, force: bool, claude_args: tuple) -> None:
     cwd = cwd or os.getcwd()
     config = load_config()
     provider_name, preset_name = config.resolve(cwd)
+    preset = config.preset_for(preset_name)
     child_env = dict(os.environ)
+    pin = config.provider_version.pin
+
+    def _launch(routed: bool):
+        # The transcript records no endpoint, so this is the only moment anyone knows
+        # whether these turns went through the proxy. Log it, then hand over the TTY.
+        append_launch(cwd=cwd, provider=provider_name, preset=preset_name, routed=routed,
+                      port=preset.port if routed else None, pin=pin)
+        os.execvpe("claude", ["claude", *claude_args], child_env)
+
     if provider_name == "headroom" and _DEFAULT_RUNTIME.get(provider_name) == "proxy":
-        preset = config.preset_for(preset_name)
+        if not _pin_ok(config, force):
+            # Fail safe: an unverified proxy is how headroom#2085 burned 36% of a weekly
+            # cap in one session. Losing compression is cheap; losing the cache is not.
+            child_env.pop("ANTHROPIC_BASE_URL", None)
+            _launch(routed=False)
+            return  # execvpe replaces the process; only reachable under test
         env = get_provider("headroom").env_for_preset(config, preset)
         ok, detail = hr_proxy_up(preset.port, env)
-        (err.print if not ok else lambda *_: None)(f"  [yellow]![/] {detail}")
+        if not ok:
+            # A proxy we couldn't start is not a proxy we're routing through — say so, and
+            # record the launch as plain so `verify` never credits it to headroom.
+            err.print(f"  [yellow]![/] {detail} — launching plain claude")
+            child_env.pop("ANTHROPIC_BASE_URL", None)
+            _launch(routed=False)
+            return
         child_env.update(env)
-    else:
-        # none / rtk-only → go direct (rtk's hook is global; no proxy).
-        child_env.pop("ANTHROPIC_BASE_URL", None)
-    # Hand the TTY to claude: replace this process, do not wrap it.
-    os.execvpe("claude", ["claude", *claude_args], child_env)
+        _launch(routed=True)
+        return
+    # none / rtk-only → go direct (rtk's hook is global; no proxy).
+    child_env.pop("ANTHROPIC_BASE_URL", None)
+    _launch(routed=False)
+
+
+def _pin_ok(config, force: bool) -> bool:
+    """Guard the launch path: refuse to route through an unpinned build."""
+    pin = config.provider_version.pin
+    live = hr_version()
+    if live == pin:
+        return True
+    what = f"installed {live}" if live else "headroom not on PATH"
+    if force:
+        err.print(f"  [yellow]![/] {what} ≠ pin {pin} — routing anyway (--force)")
+        return True
+    err.print(f"  [red]![/] {what} ≠ pin {pin} — [bold]not routing[/]; launching plain claude.")
+    err.print("      fix: [cyan]mcpm compression pin --install --refresh[/]  "
+              "(or --force to override)")
+    return False
 
 
 @compression.group(help="Proxy lifecycle for the active preset (up / down / restart).")

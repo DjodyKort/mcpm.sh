@@ -1,4 +1,4 @@
-"""Tests for the headroom update mechanism (version tracking + `update` command)."""
+"""`update` — deliberate pin bump with auto-detect. Sandbox the config dir; nothing spawns."""
 from __future__ import annotations
 
 import os
@@ -16,47 +16,88 @@ from mcpm_compression.providers import headroom_runtime as hr  # noqa: E402
 from mcpm_compression.schema import CompressionConfig  # noqa: E402
 
 
-def test01_version_tuple_orders_correctly():
-    assert hr.version_tuple("0.27.0") > hr.version_tuple("0.26.0")
-    assert hr.version_tuple("0.27.0") == hr.version_tuple("0.27.0")
-    assert hr.version_tuple(None) == ()
-    assert hr.version_tuple("garbage") == ()
-    # below-contract is detectable
-    assert hr.version_tuple("0.26.0") < hr.version_tuple(hr.CONTRACT_VERSION)
+def test01_latest_version_reads_pypi_info_version():
+    payload = b'{"info": {"version": "0.31.0"}, "releases": {}}'
+    ctx = mock.MagicMock()
+    ctx.__enter__.return_value.read.return_value = payload
+    with mock.patch("mcpm_compression.providers.headroom_runtime.urllib.request.urlopen",
+                    return_value=ctx):
+        assert hr.latest_version("headroom-ai") == "0.31.0"
 
 
-def test02_contract_version_is_floor():
-    assert hr.version_tuple(hr.MIN_VERSION) <= hr.version_tuple(hr.CONTRACT_VERSION)
+def test02_latest_version_returns_none_when_unreachable():
+    with mock.patch("mcpm_compression.providers.headroom_runtime.urllib.request.urlopen",
+                    side_effect=OSError("offline")):
+        assert hr.latest_version() is None
 
 
-def test03_upgrade_no_uv_is_safe_noop():
-    with mock.patch.object(hr, "version", return_value="0.27.0"), \
-         mock.patch("mcpm_compression.providers.headroom_runtime.shutil.which", return_value=None):
-        ok, detail, before, after = hr.upgrade()
-    assert ok is False and "uv" in detail and before == after == "0.27.0"
-
-
-def test04_update_command_upgrades_then_resnapshots():
-    # Seed a config whose agent preset env is empty → update must refill it.
-    cfg = CompressionConfig(provider="headroom")
-    cfg.presets["agent"].env = {}
-    save_config(cfg)
-
-    fake_env = {"HEADROOM_MODE": "token", "HEADROOM_SAVINGS_PROFILE": "agent-90"}
-    with mock.patch.object(cli_mod, "hr_upgrade", return_value=(True, "upgraded 0.27.0 → 0.28.0", "0.27.0", "0.28.0")), \
-         mock.patch.object(cli_mod, "snapshot_profile_env", return_value=fake_env) as snap:
+def test03_bare_update_previews_latest_without_touching_config():
+    save_config(CompressionConfig(provider="headroom"))
+    with mock.patch.object(cli_mod, "hr_latest", return_value="0.31.0"), \
+         mock.patch.object(cli_mod, "hr_install") as inst:
         res = CliRunner().invoke(cli_mod.update, [])
-
     assert res.exit_code == 0, res.output
-    snap.assert_called()  # re-snapshotted
-    assert "restart proxies" in res.output  # version changed → restart hint
-    after = load_config()
-    assert after.presets["agent"].env == fake_env  # config refilled from the new binary
+    assert "0.31.0" in res.output and "preview only" in res.output
+    inst.assert_not_called()
+    assert load_config().provider_version.pin != "0.31.0"  # preview must not move the pin
 
 
-def test05_update_aborts_cleanly_on_failed_upgrade():
-    with mock.patch.object(cli_mod, "hr_upgrade", return_value=(False, "uv tool upgrade failed", "0.27.0", "0.27.0")), \
-         mock.patch.object(cli_mod, "snapshot_profile_env") as snap:
-        res = CliRunner().invoke(cli_mod.update, [])
-    assert res.exit_code == 0, res.output  # reports, doesn't crash
-    snap.assert_not_called()  # no re-snapshot when the upgrade failed
+def test04_accept_moves_pin_installs_and_refreshes():
+    save_config(CompressionConfig(provider="headroom"))
+    with mock.patch.object(cli_mod, "hr_latest", return_value="0.31.0"), \
+         mock.patch.object(cli_mod, "hr_install",
+                           return_value=(True, "0.29.0 → 0.31.0", "0.29.0", "0.31.0")) as inst, \
+         mock.patch.object(cli_mod, "_refresh_snapshots") as refresh:
+        res = CliRunner().invoke(cli_mod.update, ["--latest", "--accept"])
+    assert res.exit_code == 0, res.output
+    assert load_config().provider_version.pin == "0.31.0"
+    assert inst.call_args[0][0] == "headroom-ai[proxy,code,ml]==0.31.0"  # exact, with extras
+    refresh.assert_called_once()
+    assert "proxy restart" in res.output  # version moved → restart reminder
+
+
+def test05_to_names_an_exact_version_and_skips_pypi():
+    save_config(CompressionConfig(provider="headroom"))
+    with mock.patch.object(cli_mod, "hr_latest") as latest, \
+         mock.patch.object(cli_mod, "hr_install",
+                           return_value=(True, "ok", "0.29.0", "0.30.0")), \
+         mock.patch.object(cli_mod, "_refresh_snapshots"):
+        res = CliRunner().invoke(cli_mod.update, ["--to", "0.30.0", "--accept"])
+    assert res.exit_code == 0, res.output
+    latest.assert_not_called()  # explicit target never hits the network
+    assert load_config().provider_version.pin == "0.30.0"
+
+
+def test06_to_and_latest_together_is_rejected():
+    save_config(CompressionConfig(provider="headroom"))
+    res = CliRunner().invoke(cli_mod.update, ["--to", "0.30.0", "--latest"])
+    assert res.exit_code == 2
+    assert "not both" in res.output
+
+
+def test07_unresolvable_latest_fails_loud():
+    save_config(CompressionConfig(provider="headroom"))
+    with mock.patch.object(cli_mod, "hr_latest", return_value=None):
+        res = CliRunner().invoke(cli_mod.update, ["--latest", "--accept"])
+    assert res.exit_code == 1
+    assert "could not resolve" in res.output
+
+
+def test08_unparseable_target_is_rejected_before_install():
+    save_config(CompressionConfig(provider="headroom"))
+    with mock.patch.object(cli_mod, "hr_install") as inst:
+        res = CliRunner().invoke(cli_mod.update, ["--to", "garbage", "--accept"])
+    assert res.exit_code == 2
+    inst.assert_not_called()
+
+
+def test09_failed_install_aborts_and_does_not_report_restart():
+    save_config(CompressionConfig(provider="headroom"))
+    with mock.patch.object(cli_mod, "hr_latest", return_value="0.31.0"), \
+         mock.patch.object(cli_mod, "hr_install",
+                           return_value=(False, "uv tool install failed", "0.29.0", "0.29.0")), \
+         mock.patch.object(cli_mod, "_refresh_snapshots") as refresh:
+        res = CliRunner().invoke(cli_mod.update, ["--latest", "--accept"])
+    assert res.exit_code == 1
+    refresh.assert_not_called()
+    assert "proxy restart" not in res.output

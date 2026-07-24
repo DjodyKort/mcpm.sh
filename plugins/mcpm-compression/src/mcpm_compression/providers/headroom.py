@@ -11,6 +11,7 @@ from ..provider import CompressionProvider, GeneratedFile, RuntimeSpec
 from ..runtime import shell_env_snippet, shim_snippet
 from ..runtime.shell import SHELL_SNIPPET_PATH, SHIMS_PATH
 from ..schema import CompressionConfig, CompressionPreset
+from ..versions import spec_matches
 from .headroom_runtime import proxy_health
 
 
@@ -18,19 +19,29 @@ class HeadroomProvider(CompressionProvider):
     name = "headroom"
 
     def env_for_preset(self, config: CompressionConfig, preset: CompressionPreset) -> Dict[str, str]:
-        """Build the launch env for a preset: its HEADROOM_* snapshot plus the knobs
-        mcpm owns. `preset.mode` is authoritative (overrides any mode in the snapshot)."""
-        env: Dict[str, str] = dict(preset.env)
+        """Build the launch env for a preset, against the pinned headroom build.
+
+        Every declared knob whose `applies` range covers the pin is emitted with its literal
+        value — including the offs. headroom seeds its own persona defaults into any knob it
+        finds unset, so "declared false" must mean an explicit `0`, never an absent key:
+        absence hands the knob back to the vendor.
+
+        A knob is dropped only when its authored `applies` range excludes the pin. It is
+        never dropped because the binary might not read it — emitting an unread knob is
+        inert, while dropping a read one would silently change behaviour.
+        """
+        pin = config.provider_version.pin
+        env: Dict[str, str] = {
+            name: k.value for name, k in preset.knobs.items() if spec_matches(pin, k.applies)
+        }
         env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{preset.port}"
         # ENABLE_TOOL_SEARCH: without it, a custom ANTHROPIC_BASE_URL makes Claude Code
-        # eager-load every tool schema and balloon context (headroom #746).
+        # eager-load every tool schema and balloon context (headroom #746). This is Claude
+        # Code's own switch, not headroom's HEADROOM_TOOL_SEARCH.
         env["ENABLE_TOOL_SEARCH"] = "true"
+        # mcpm owns mode and telemetry outright; they win over any snapshot value.
         env["HEADROOM_MODE"] = preset.mode
         env["HEADROOM_TELEMETRY"] = config.telemetry
-        if preset.intercept_tool_results:
-            env["HEADROOM_INTERCEPT_ENABLED"] = "1"
-        if preset.code_aware:
-            env["HEADROOM_CODE_AWARE_ENABLED"] = "true"
         return env
 
     def mcp_server_config(self, config: CompressionConfig) -> Optional[dict]:

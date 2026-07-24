@@ -15,7 +15,7 @@ Install mcpm from this fork with skills, agents, styles, and sync support.
 # Clone
 git clone git@github.com:DjodyKort/mcpm.sh.git
 cd mcpm.sh
-git checkout feat/skill-sync-system
+git checkout feature/cc-plugins-and-fork-sync
 git submodule update --init --recursive
 
 # Install mcpm (editable — changes take effect immediately)
@@ -25,6 +25,7 @@ uv tool install --force --editable .
 mcpmPython="$(uv tool dir)/mcpm/bin/python"
 uv pip install --python "$mcpmPython" -e plugins/mcpm-sync
 uv pip install --python "$mcpmPython" -e plugins/mcpm-mcp
+uv pip install --python "$mcpmPython" -e plugins/mcpm-context
 
 # Verify
 mcpm --version
@@ -39,7 +40,7 @@ mcpm mcp doctor
 # Clone
 git clone git@github.com:DjodyKort/mcpm.sh.git
 cd mcpm.sh
-git checkout feat/skill-sync-system
+git checkout feature/cc-plugins-and-fork-sync
 git submodule update --init --recursive
 
 # Install mcpm (editable)
@@ -49,6 +50,7 @@ uv tool install --force --editable .
 $mcpmPython = Join-Path (uv tool dir) "mcpm\Scripts\python.exe"
 uv pip install --python $mcpmPython -e plugins/mcpm-sync
 uv pip install --python $mcpmPython -e plugins/mcpm-mcp
+uv pip install --python $mcpmPython -e plugins/mcpm-context
 
 # Verify
 mcpm --version
@@ -230,15 +232,22 @@ With `--auto`, every `mcpm sync push/pull` also pulls the latest skills from thi
 
 ## Update
 
-Since mcpm is editable-installed, pulling new code is enough:
+Editable installs make code changes to **already-installed** packages live on `git pull`.
+But a **newly added plugin** only exposes its command after it's (re)installed into mcpm's
+venv — a plain pull leaves it missing (`mcpm <cmd>` → `No such command`). Use the update
+script, which pulls the current branch, refreshes submodules, and re-registers every plugin:
 
 ```bash
 cd mcpm.sh
-git pull origin feat/skill-sync-system
-git submodule update --recursive
+./scripts/update.sh          # or: mcpmup   (if the shell alias is set up)
 ```
 
-No reinstall needed — changes are live immediately.
+`scripts/update.sh` is idempotent and `--ff-only` (it won't clobber uncommitted work). It
+follows whatever branch is checked out and globs `plugins/*/` with a `pyproject.toml` guard,
+so new plugins register automatically and empty/uninitialized submodules are skipped.
+
+> The compression and context plugins live only on the active feature branch, not on `main`
+> — so "latest" tracks the current branch, never a hard switch to `main`.
 
 ## Daily workflow
 

@@ -46,6 +46,19 @@ Claude-Code-only. `mcpm cc update` refreshes Claude Code marketplace catalogs an
 - `src/mcpm/cc/` — `claude_cli.py` (subprocess wrapper over `claude`), `state.py` (read-only on-disk readers), `updater.py` (`CcUpdateCheck`/`CcUpdateApply`, never-raises like `core/updater.py`)
 - `src/mcpm/commands/cc/` — `update.py`, `list.py`
 
+### Context layers & Claude profiles (`mcpm context`, plugin `plugins/mcpm-context/`)
+
+Layered Claude context coexisting with the cf-dev-tools org sync: personal +
+per-client layers as skills-repo **rules** (`rules/personal/`, `rules/client-<slug>/`
+with `globs`) transpiled to `~/.claude/rules/`; full `CLAUDE_CONFIG_DIR` profiles
+generated under `~/.config/mcpm/claude-profiles/<name>/` with `claude-<name>()`
+shims (`~/.config/mcpm/context-shims.zsh`); MCP dedupe of cf's legacy bare-name
+entries; settings-union that survives cf's array-clobbering jq merge. Policy in
+`~/.config/mcpm/context.json` (carried in the mcpm-sync bundle). Ownership
+contract + empirical findings (per-profile `/login`, globs string format):
+`plugins/mcpm-context/ARCHITECTURE.md`. Upstream proposal for cf-dev-tools:
+`_docs/specs/open/cf-dev-tools-upstream-proposal.md`.
+
 ### Fork maintenance (`scripts/sync-upstream.sh`)
 
 This repo is a fork of `pathintegral-institute/mcpm.sh`. `scripts/sync-upstream.sh [--check] [--rebase]` fetches the `upstream` remote, shows incoming commits, and merges (or rebases) onto a dated `sync-upstream-<date>` branch. Never auto-pushes.

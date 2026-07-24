@@ -1,9 +1,15 @@
 # mcpm-compression — architecture & integration contract
 
-Status: living doc. headroom: **track latest** via uv constraint `>=0.27.0` (extras
-`proxy,code,ml`). `CONTRACT_VERSION` (currently `0.27.0`) marks the version the bundled
-fallback + fixtures were verified against; `mcpm compression update` upgrades and
-re-snapshots the live contract (see Versioning).
+Status: living doc. headroom: **pinned exactly** via uv constraint `==<pin>` (extras
+`proxy,code,ml`), recorded in `compression.json` → `provider_version.pin`. Current pin:
+`0.29.0`. Bumping it is a reviewed act, never a side effect (see Versioning).
+
+> **Reversal note.** This supersedes `49e7fab` ("track latest headroom"), which replaced
+> the earlier `==0.26.0` pin with a `>=` floor. Track-latest is what let 0.31.0 arrive
+> unreviewed, carrying an open measured cache-busting bug (headroom#2085: 4.4x cache-write
+> inflation) and a new `DEFAULT_PROFILE="coding"` that seeds 19 undeclared knobs into any
+> proxy. Recorded here so the un-pin isn't re-litigated from first principles.
+> Full rationale: `_docs/specs/open/compression-headroom-pinning.md`.
 
 ## What this plugin is (and is not)
 
@@ -52,23 +58,43 @@ commands are used only at **config time** (snapshotting into our config), never 
 | `headroom install apply\|start\|stop\|status\|remove` (`--profile/--port/--mode`) | optional always-on persistence | opt-in only; default is on-demand wrapper |
 | profile names `agent-90`, `balanced` | preset seeds | captured in fixtures; user-overridable |
 
-### Versioning — track latest, re-verify on update
-- We do **not** hard-pin. uv constraint is `>=MIN_VERSION` (0.27.0); `mcpm compression
-  update` runs `uv tool upgrade headroom-ai` and then **re-snapshots every preset's env**
-  from the new binary, so the synced policy stays truthful across upgrades.
-- `CONTRACT_VERSION` is the version the bundled fallback constant + `tests/fixtures/`
-  were captured/verified at. Running newer is expected and fine — the **live snapshot is
-  authoritative**; the constant is only an offline fallback (headroom off PATH).
-- `status`/`doctor` report running vs contract: below contract ⇒ warn + suggest `update`;
-  at/above ⇒ ok. Never a hard fail on "newer".
-- The 0.26→0.27 bump was contract-clean: `agent-savings` (both profiles) and `/health`
-  shape are byte-identical; 0.27's `HEADROOM_TELEMETRY=off` default is moot (we set it
-  explicitly). When bumping, run `update` (and `presets --refresh`); if `agent-savings`
-  ever changes, refresh `tests/fixtures/` + the fallback constant.
+### Versioning — pin exactly, bump deliberately
+- The uv constraint is `==provider_version.pin`. `mcpm compression pin <v> --install
+  --refresh` sets it, installs that exact build, and re-snapshots every preset's knobs
+  from **it**, recording `snapshot_version` so the config says which build it describes.
+- `mcpm compression update [--to X | --latest] [--accept]` is the sanctioned bump: it
+  resolves a target (newest published on PyPI when unspecified), records it as an **exact**
+  pin, installs, and re-snapshots. It is *not* a return to track-latest — the constraint
+  stays `==`, the target is resolved once and frozen into the config, and `--accept` gates
+  the mutation (a bare invocation only previews). `hrupdate` = `update --latest --accept`.
+  Newest is unverified against the recorded fixtures by construction, so it always prints a
+  reminder to run `verify`.
+- **Newer is unverified, not fine.** `status`/`doctor` hard-fail on any mismatch, in either
+  direction. The old `>=` check reported 0.31-against-contract-0.27 as *ok* — which is how
+  four releases of drift went unnoticed.
+- **There is no offline fallback env.** A bundled constant made one preset name resolve to
+  two runtimes depending on whether the binary was on PATH. `snapshot_profile_env` now
+  raises `HeadroomUnavailable` instead of guessing.
+- Knob applicability is **measured, not assumed**: knobs genuinely read from env are 114
+  (0.27) → 137 (0.29) → 147 (0.31). `HEADROOM_PROTECT_READS`, `DEDUPE`, `TOOL_SEARCH` and
+  `LOSSLESS_THEN_LOSSY` are 0.31-only, so declaring them on a 0.29 pin would claim
+  properties that build never honours. `KnobSpec.applies` gates them.
+- **Do not trust headroom's reported savings.** Its accounting was wrong four distinct ways
+  across 0.28–0.31 (#1429 cached requests priced at $0, #1653 disagreeing dashboard
+  denominators, #1800 cache-write premiums not subtracted, cache-mode history dropped).
+  `mcpm compression verify` reads provider-billed usage from Claude Code's own transcripts
+  instead.
 
 ### Drift / gotchas
-- `POST /admin/runtime-env` is in headroom's README but **absent through 0.27.0** → mode
-  change requires a proxy **restart**, never per-request.
+- `POST /admin/runtime-env` **exists** (verified in the 0.27.0 wheel at `server.py:2386`,
+  still present at 0.31.0) — an earlier revision of this doc claimed it was absent. But
+  `HEADROOM_MODE` is **not** a registered hot-reload knob (`proxy/runtime_env.py` covers
+  only the output-shaper knobs), so a mode change still requires a proxy **restart** and
+  the two-port design stands. Right conclusion, wrong reason.
+- From **0.30**, `seed_proxy_env_defaults()` runs at both proxy entry points and seeds
+  `DEFAULT_PROFILE="coding"` into every unset knob (`setdefault` semantics, so explicit env
+  still wins). An undeclared knob is therefore a knob the vendor owns — and silently
+  re-owns on upgrade. This is why presets declare every knob explicitly, offs included.
 - Mode is **cold-start per process**; simultaneous cache+token ⇒ two proxies/ports.
 - Subagents inherit the parent's `ANTHROPIC_BASE_URL` ⇒ routing is per **launched**
   client/dir, not per subagent.

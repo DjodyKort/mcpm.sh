@@ -33,7 +33,7 @@ from .runtime.shell import SHELL_SNIPPET_PATH, SHIMS_PATH
 from .schema import DEFAULT_PORT, KnobSpec
 from .sync import apply, disable as do_disable
 from .versions import version_tuple
-from .verify import compare, iter_transcripts, measure, partition, schema_ok
+from .verify import compare, iter_transcripts, measure, partition, partition_by_pin, schema_ok
 
 console = Console()
 err = Console(stderr=True)
@@ -420,7 +420,10 @@ def seal(preset_name: str | None, do_apply: bool) -> None:
 @click.option("--limit", type=int, default=None, help="Only the N most recent sessions.")
 @click.option("--min-turns", type=int, default=5, show_default=True,
               help="Ignore sessions with fewer billed turns.")
-def verify(limit: int | None, min_turns: int) -> None:
+@click.option("--by-pin", is_flag=True,
+              help="Break the proxied bucket down by the headroom pin each session ran "
+                   "against (A/B by version).")
+def verify(limit: int | None, min_turns: int, by_pin: bool) -> None:
     paths = list(iter_transcripts())
     if limit:
         paths = paths[:limit]
@@ -475,6 +478,35 @@ def verify(limit: int | None, min_turns: int) -> None:
         colour = "green" if delta >= -1 else "red"
         console.print(f"  vs {label}: [{colour}]{delta:+.1f} pp[/] read ratio "
                       f"[dim]({base.read_ratio:.1%} → {proxied.read_ratio:.1%})[/]")
+    if by_pin:
+        by = partition_by_pin(buckets["proxied"])
+        base_rw = unattr.read_write
+        if not by:
+            console.print("\n  [dim]--by-pin: no pin-tagged proxied sessions yet.[/]")
+        else:
+            console.print("\n  [bold]proxied by pin[/] — A/B by headroom version:")
+            pin_table = Table(show_header=True, box=None)
+            for col in ("pin", "sessions", "turns", "read ratio", "read:write", "vs baseline"):
+                pin_table.add_column(col)
+            for pin in sorted(by):
+                pm = measure(by[pin], min_turns=min_turns)
+                if not pm.sessions:
+                    continue
+                if pm.read_write is not None and base_rw is not None:
+                    colour = "green" if pm.read_write >= base_rw else "red"
+                    vs_base = f"[{colour}]{pm.read_write - base_rw:+.2f}x[/]"
+                else:
+                    vs_base = "—"
+                pin_table.add_row(
+                    pin, f"{pm.sessions:,}", f"{pm.turns:,}",
+                    f"{pm.read_ratio:.1%}" if pm.read_ratio is not None else "—",
+                    f"{pm.read_write:.2f}x" if pm.read_write is not None else "—",
+                    vs_base,
+                )
+            console.print(pin_table)
+            if base_rw is not None:
+                console.print(f"  [dim]a pin earns re-enable only if it does not degrade vs "
+                              f"baseline ({base_rw:.2f}x read:write).[/]")
     console.print("  [dim]source: provider-billed usage in Claude Code transcripts — "
                   "never headroom's own /stats (its accounting was wrong four ways across "
                   "0.28–0.31).[/]")

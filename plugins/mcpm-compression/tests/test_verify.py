@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from mcpm_compression.verify import measure, schema_ok
+from mcpm_compression.verify import measure, partition_by_pin, schema_ok
 
 
 def _session(tmp_path, name, turns, read, create):
@@ -67,3 +67,44 @@ def test06_schema_ok_detects_missing_fields(tmp_path):
     # If Claude Code stops writing cache_*, measure() would return zeros — which reads as a
     # total cache collapse rather than a missing field. Callers must skip, not report.
     assert not schema_ok([bad])
+
+
+def _session_at(tmp_path, name, cwd, ts, turns=6, read=9000, create=300):
+    # session_origin() reads timestamp + cwd from the first record; carry them on every turn.
+    p = tmp_path / f"{name}.jsonl"
+    with p.open("w") as fh:
+        for _ in range(turns):
+            fh.write(json.dumps({
+                "timestamp": ts,
+                "cwd": cwd,
+                "message": {"usage": {
+                    "input_tokens": 2,
+                    "cache_read_input_tokens": read,
+                    "cache_creation_input_tokens": create,
+                    "output_tokens": 100,
+                }},
+            }) + "\n")
+    return p
+
+
+def test07_partition_by_pin_groups_proxied_by_version(tmp_path):
+    launches = [
+        {"ts": "2026-07-01T10:00:00+00:00", "cwd": "/work/a", "routed": True, "pin": "0.29.0"},
+        {"ts": "2026-07-01T11:00:00+00:00", "cwd": "/work/b", "routed": True, "pin": "0.32.0"},
+        {"ts": "2026-07-01T12:00:00+00:00", "cwd": "/work/c", "routed": False, "pin": "0.29.0"},
+    ]
+    a = _session_at(tmp_path, "a", "/work/a", "2026-07-01T10:00:02+00:00")
+    b = _session_at(tmp_path, "b", "/work/b", "2026-07-01T11:00:02+00:00")
+    _session_at(tmp_path, "c", "/work/c", "2026-07-01T12:00:02+00:00")  # plain — must not appear
+
+    by = partition_by_pin([a, b], launches=launches)
+    by_all = partition_by_pin([a, b, tmp_path / "c.jsonl"], launches=launches)
+    assert by["0.29.0"] == [a] and by["0.32.0"] == [b]
+    assert set(by_all) == {"0.29.0", "0.32.0"}  # routed=False (plain) is excluded
+
+
+def test08_partition_by_pin_labels_missing_pin_unknown(tmp_path):
+    launches = [{"ts": "2026-07-01T10:00:00+00:00", "cwd": "/w", "routed": True}]  # no pin
+    s = _session_at(tmp_path, "s", "/w", "2026-07-01T10:00:03+00:00")
+    by = partition_by_pin([s], launches=launches)
+    assert list(by) == ["unknown"] and by["unknown"] == [s]

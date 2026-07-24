@@ -168,6 +168,29 @@ def partition(paths: Iterable[Path], launches: Optional[List[Dict]] = None) -> D
     return out
 
 
+def partition_by_pin(paths: Iterable[Path], launches: Optional[List[Dict]] = None
+                     ) -> Dict[str, List[Path]]:
+    """Proxied sessions grouped by the headroom pin their launch ran against.
+
+    Only sessions that actually routed appear; each is keyed by the `pin` its ledger launch
+    recorded (`unknown` when the launch predates pin tracking). This is what makes an A/B
+    legible: Arm A (0.29.0) and Arm B (0.32.0) land in separate buckets instead of blending
+    into one proxied number the way `partition` alone would leave them.
+    """
+    from .ledger import attribute, read_launches
+
+    recs = read_launches() if launches is None else launches
+    out: Dict[str, List[Path]] = {}
+    for p in paths:
+        start, cwd = session_origin(p)
+        match = attribute(start, cwd, recs)
+        if match is None or not match.get("routed"):
+            continue
+        pin = match.get("pin") or "unknown"
+        out.setdefault(pin, []).append(p)
+    return out
+
+
 def compare(a: Metrics, b: Metrics) -> Optional[float]:
     """Percentage-point change in read ratio, b relative to a. None if either is empty."""
     if a.read_ratio is None or b.read_ratio is None:

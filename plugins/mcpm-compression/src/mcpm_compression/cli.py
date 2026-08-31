@@ -28,6 +28,14 @@ from .providers.headroom_runtime import (
     snapshot_profile_env,
     version as hr_version,
 )
+from .providers.tokenade_runtime import (
+    hooks_present as tk_hooks_present,
+    install as tk_install,
+    latest_version as tk_latest,
+    updater_disabled as tk_updater_disabled,
+    vendor_uninstall as tk_vendor_uninstall,
+    version as tk_version,
+)
 from .runtime import LAUNCHD_LABEL, launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH, SHIMS_PATH
 from .schema import DEFAULT_PORT, KnobSpec
@@ -39,7 +47,15 @@ console = Console()
 err = Console(stderr=True)
 
 # Provider → default runtime, so `enable` infers a sane runtime when omitted.
-_DEFAULT_RUNTIME = {"headroom": "proxy", "rtk-only": "hook", "none": "none"}
+_DEFAULT_RUNTIME = {"headroom": "proxy", "tokenade": "hook", "rtk-only": "hook", "none": "none"}
+
+# Pinned providers → (installed-version probe, registry-latest probe, exact installer).
+# A dict dispatch, not ABC methods: two providers don't justify widening the seam.
+# Lambdas late-bind the module globals so tests (and anything else) can patch them.
+_PIN_TOOLS = {
+    "headroom": (lambda: hr_version(), lambda p: hr_latest(p), lambda r: hr_install(r)),
+    "tokenade": (lambda: tk_version(), lambda p: tk_latest(p), lambda r: tk_install(r)),
+}
 
 
 def _print_report(report) -> None:
@@ -49,8 +65,24 @@ def _print_report(report) -> None:
         err.print(f"  [yellow]![/] {w}")
 
 
+def _print_engage(actions, warnings) -> None:
+    for a in actions:
+        console.print(f"  [green]✓[/] {a}")
+    for w in warnings:
+        err.print(f"  [yellow]![/] {w}")
+
+
+def _switch_side_effects(old_provider: str, config) -> None:
+    """Provider-specific engage/disengage around a provider change (explicit acts only —
+    `apply` stays declarative). Currently only tokenade has global side effects."""
+    if old_provider == "tokenade" and config.provider != "tokenade":
+        _print_engage(*get_provider("tokenade").disengage(config))
+    if config.provider == "tokenade":
+        _print_engage(*get_provider("tokenade").engage(config))
+
+
 @click.group(
-    help="Manage the swappable context-compression layer (headroom / rtk-only / none).",
+    help="Manage the swappable context-compression layer (headroom / tokenade / rtk-only / none).",
     context_settings=dict(help_option_names=["-h", "--help"]),
 )
 def compression() -> None:
@@ -75,18 +107,30 @@ def status() -> None:
                   else f"[red]down[/] — {health.get('detail','')}")
     if health.get("version"):
         table.add_row("version", str(health["version"]))
-    if config.provider == "headroom":
-        pin = config.provider_version.pin
-        v = hr_version()
+    if config.provider in _PIN_TOOLS:
+        pin = config.pin_for().pin
+        v = _PIN_TOOLS[config.provider][0]()
         if not v:
-            table.add_row("headroom", f"[yellow]not on PATH (pin {pin})[/]")
+            table.add_row(config.provider, f"[yellow]not on PATH (pin {pin})[/]")
         elif v == pin:
-            table.add_row("headroom", f"[green]{v}[/] (pinned)")
+            table.add_row(config.provider, f"[green]{v}[/] (pinned)")
         else:
             # Any mismatch is drift — including newer. "Newer" is unverified, not fine:
             # 0.31 was newer than 0.27 and shipped a measured cache-busting regression.
-            table.add_row("headroom", f"[red]{v} ≠ pin {pin}[/] — run "
+            table.add_row(config.provider, f"[red]{v} ≠ pin {pin}[/] — run "
                           f"[cyan]mcpm compression pin --install[/]")
+    if config.provider == "tokenade" or tk_hooks_present():
+        # Hooks are global runtime state, so surface them even when the policy says
+        # another provider — a leftover hook set means every session is still optimized.
+        engaged = tk_hooks_present()
+        expected = config.provider == "tokenade"
+        if engaged and not expected:
+            table.add_row("tokenade hooks", "[red]still present[/] — run "
+                          "[cyan]mcpm compression disable[/] to remove them")
+        else:
+            table.add_row("tokenade hooks",
+                          "[green]live (global — all sessions)[/]" if engaged
+                          else "[yellow]not installed — run enable[/]")
     desired = provider.mcp_server_config(config)
     mcp_name = desired["name"] if desired else None
     if mcp_name:
@@ -120,6 +164,7 @@ def enable(provider_name: str, port: int | None, telemetry: str | None,
            preset_name: str | None, mode: str | None) -> None:
     # Load-merge so we never clobber existing contexts/clients/scope/presets.
     config = load_config()
+    old_provider = config.provider
     config.provider = provider_name
     config.runtime = _DEFAULT_RUNTIME.get(provider_name, "none")
     if preset_name:
@@ -137,12 +182,22 @@ def enable(provider_name: str, port: int | None, telemetry: str | None,
                   f"(preset {config.active_preset}, mode {config.preset_for().mode})")
     report = apply(config)
     _print_report(report)
+    _switch_side_effects(old_provider, config)
     console.print("\n[bold]Next steps:[/]")
     if provider_name == "headroom":
         console.print(f"  • add to ~/.zshrc: [cyan]source {SHIMS_PATH}[/]  "
                       "(hrclaude/hrup/hrdown — replaces headroom-aliases.zsh)")
         console.print("  • or launch directly: [cyan]mcpm compression run -- <claude args>[/]  "
                       "(resolves the per-dir preset, ensures the proxy, execs claude)")
+    elif provider_name == "tokenade":
+        console.print("  • activate the machine once: [cyan]tokenade login[/]  "
+                      "(browser device-flow; or [cyan]tokenade activate <key>[/])")
+        console.print(f"  • launch via [cyan]hrclaude[/] (source {SHIMS_PATH}) so the "
+                      "ledger attributes sessions — hooks are global, but only ledgered "
+                      "launches make [cyan]verify[/] legible")
+        console.print("  • after a few real sessions: [cyan]mcpm compression verify[/]  "
+                      "(billed cache usage from Claude Code transcripts — never the "
+                      "vendor's own savings numbers)")
     console.print("  • verify: [cyan]mcpm compression status[/] / [cyan]doctor[/]   (MCP presence already propagated)")
 
 
@@ -151,15 +206,27 @@ def enable(provider_name: str, port: int | None, telemetry: str | None,
               help="Also run headroom's own removal (mcp uninstall + unwrap claude).")
 def disable(teardown: bool) -> None:
     console.print("[bold]Disabling compression[/]")
+    old = load_config()
+    if old.provider == "tokenade" or tk_hooks_present():
+        # Hooks are the runtime; leaving them while the policy says "none" would make
+        # `disable` a lie. Disengage even when the policy already drifted to another
+        # provider but the hooks stayed behind.
+        _print_engage(*get_provider("tokenade").disengage(old))
     report = do_disable()
     _print_report(report)
     if teardown:
-        from .providers.headroom_runtime import mcp_uninstall, unwrap
-        for label, (ok, detail) in [("headroom mcp uninstall", mcp_uninstall()),
-                                     ("headroom unwrap claude", unwrap("claude"))]:
+        if old.provider == "tokenade":
+            ok, detail = tk_vendor_uninstall()
             (console.print if ok else err.print)(f"  [{'green' if ok else 'yellow'}]"
-                                                  f"{'✓' if ok else '!'}[/] {label} — {detail}")
-        console.print("  [dim]Note: ~/.headroom/ data (toin/savings/memory) is left in place.[/]")
+                                                  f"{'✓' if ok else '!'}[/] tokenade uninstall — {detail}")
+            console.print("  [dim]Note: `tokenade uninstall` also wipes ~/.tokenade data.[/]")
+        else:
+            from .providers.headroom_runtime import mcp_uninstall, unwrap
+            for label, (ok, detail) in [("headroom mcp uninstall", mcp_uninstall()),
+                                         ("headroom unwrap claude", unwrap("claude"))]:
+                (console.print if ok else err.print)(f"  [{'green' if ok else 'yellow'}]"
+                                                      f"{'✓' if ok else '!'}[/] {label} — {detail}")
+            console.print("  [dim]Note: ~/.headroom/ data (toin/savings/memory) is left in place.[/]")
     if launchd_plist_path().exists():
         console.print(f"\n  Note: a legacy launchd job may still be loaded — remove with "
                       f"[cyan]launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}[/]")
@@ -169,11 +236,13 @@ def disable(teardown: bool) -> None:
 @click.argument("provider_name", type=click.Choice(provider_names()))
 def set_provider(provider_name: str) -> None:
     config = load_config()
+    old_provider = config.provider
     config.provider = provider_name
     config.runtime = _DEFAULT_RUNTIME.get(provider_name, config.runtime)
     console.print(f"[bold]Switching provider → {provider_name}[/]")
     report = apply(config)
     _print_report(report)
+    _switch_side_effects(old_provider, config)
     console.print("  Then [cyan]mcpm client sync[/].")
 
 
@@ -210,27 +279,42 @@ def presets(refresh: bool) -> None:
     console.print(table)
 
 
-@compression.command(help="Show or set the exact headroom pin (and optionally install it).")
+def _pin_target(config, provider_opt: str | None) -> str:
+    """Which provider a pin/update command operates on: explicit flag, else the active
+    provider when it is pinned, else headroom (the historical default)."""
+    if provider_opt:
+        return provider_opt
+    return config.provider if config.provider in _PIN_TOOLS else "headroom"
+
+
+@compression.command(help="Show or set the exact provider pin (and optionally install it).")
 @click.argument("version", required=False)
+@click.option("--provider", "provider_opt", type=click.Choice(sorted(_PIN_TOOLS)),
+              default=None, help="Which provider's pin (default: the active one).")
 @click.option("--install", "do_install", is_flag=True,
-              help="Install the pinned build exactly (uv tool install ==<pin> --force).")
+              help="Install the pinned build exactly (uv/npm, exact version).")
 @click.option("--refresh", is_flag=True,
-              help="Re-snapshot preset knobs from the pinned binary after installing.")
-def pin(version: str | None, do_install: bool, refresh: bool) -> None:
+              help="Re-snapshot preset knobs from the pinned binary after installing (headroom only).")
+def pin(version: str | None, provider_opt: str | None, do_install: bool, refresh: bool) -> None:
     config = load_config()
-    pv = config.provider_version
+    target = _pin_target(config, provider_opt)
+    installed_of, _, install_exact = _PIN_TOOLS[target]
+    pv = config.pin_for(target)
 
     if version:
         pv.pin = version
         save_config(config)
         # escape(): the extras marker reads as Rich markup and would be swallowed, leaving
         # a requirement that installs headroom without its proxy.
-        console.print(f"[bold]Pin → {version}[/]  (requirement: [cyan]{escape(pv.requirement())}[/])")
-        console.print("  [dim]presets still hold values snapshotted from another build — "
-                      "re-snapshot with `--install --refresh`.[/]")
+        console.print(f"[bold]{target} pin → {version}[/]  "
+                      f"(requirement: [cyan]{escape(pv.requirement())}[/])")
+        if target == "headroom":
+            console.print("  [dim]presets still hold values snapshotted from another build — "
+                          "re-snapshot with `--install --refresh`.[/]")
 
-    live = hr_version()
+    live = installed_of()
     table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_row("provider", target)
     table.add_row("pin", f"[bold]{pv.pin}[/]")
     table.add_row("requirement", escape(pv.requirement()))
     table.add_row("installed", live or "[yellow]not on PATH[/]")
@@ -240,17 +324,17 @@ def pin(version: str | None, do_install: bool, refresh: bool) -> None:
 
     if not do_install:
         if live and live != pv.pin:
-            console.print("\n  Install the pin: [cyan]mcpm compression pin --install --refresh[/]")
+            console.print("\n  Install the pin: [cyan]mcpm compression pin --install[/]")
         return
 
     console.print(f"\n[bold]Installing {escape(pv.requirement())}[/]")
-    ok, detail, before, after = hr_install(pv.requirement())
+    ok, detail, before, after = install_exact(pv.requirement())
     (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]{'✓' if ok else '✗'}[/] {detail}")
     if not ok:
         raise SystemExit(1)
-    if refresh:
+    if refresh and target == "headroom":
         _refresh_snapshots(config)
-    if before != after:
+    if before != after and target == "headroom":
         console.print("  • restart proxies to run the pinned build: "
                       "[cyan]mcpm compression proxy restart[/] (close attached sessions first)")
 
@@ -305,10 +389,13 @@ def _refresh_snapshots(config) -> None:
 @click.option("--to", "to_version", metavar="VERSION",
               help="Bump to this exact version (e.g. 0.31.0).")
 @click.option("--latest", "to_latest", is_flag=True,
-              help="Resolve the newest published headroom-ai from PyPI and bump to it.")
+              help="Resolve the newest published build from the registry and bump to it.")
+@click.option("--provider", "provider_opt", type=click.Choice(sorted(_PIN_TOOLS)),
+              default=None, help="Which provider's pin (default: the active one).")
 @click.option("--accept", is_flag=True,
               help="Actually move the pin, install, and re-snapshot. Without it this only previews.")
-def update(to_version: str | None, to_latest: bool, accept: bool) -> None:
+def update(to_version: str | None, to_latest: bool, provider_opt: str | None,
+           accept: bool) -> None:
     """Move the exact pin deliberately — the one sanctioned path off the current build.
 
     A bare `update` (or `--latest`) resolves the newest published build; `--to` names one.
@@ -322,17 +409,20 @@ def update(to_version: str | None, to_latest: bool, accept: bool) -> None:
         raise SystemExit(2)
 
     config = load_config()
-    pv = config.provider_version
+    provider = _pin_target(config, provider_opt)
+    _, latest_of, install_exact = _PIN_TOOLS[provider]
+    pv = config.pin_for(provider)
     current = pv.pin
 
     # No explicit target means "newest" — that is what auto-detection buys.
     if to_version:
         target = to_version
     else:
-        console.print("[dim]Resolving newest headroom-ai from PyPI…[/]")
-        target = hr_latest(pv.package)
+        registry = "the npm registry" if pv.ecosystem == "npm" else "PyPI"
+        console.print(f"[dim]Resolving newest {escape(pv.package)} from {registry}…[/]")
+        target = latest_of(pv.package)
         if not target:
-            err.print("[red]✗[/] could not resolve the latest version from PyPI "
+            err.print(f"[red]✗[/] could not resolve the latest version from {registry} "
                       "(offline?). Name it explicitly: [cyan]mcpm compression update --to X[/]")
             raise SystemExit(1)
 
@@ -341,7 +431,7 @@ def update(to_version: str | None, to_latest: bool, accept: bool) -> None:
         raise SystemExit(2)
 
     same = target == current
-    console.print(f"[bold]Update pin[/]  "
+    console.print(f"[bold]Update {provider} pin[/]  "
                   f"{'already pinned at ' + target if same else current + ' → ' + target}")
     # Newest is unverified against the recorded fixtures/contract by construction — the
     # reason the pin exists. Surface it every time, then let verify be the arbiter.
@@ -356,14 +446,18 @@ def update(to_version: str | None, to_latest: bool, accept: bool) -> None:
     pv.pin = target
     save_config(config)
     console.print(f"\n[bold]Installing {escape(pv.requirement())}[/]")
-    ok, detail, before, after = hr_install(pv.requirement())
+    ok, detail, before, after = install_exact(pv.requirement())
     (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]{'✓' if ok else '✗'}[/] {detail}")
     if not ok:
         raise SystemExit(1)
-    _refresh_snapshots(config)
-    if before != after:
-        console.print("  • restart proxies to run the new build: "
-                      "[cyan]mcpm compression proxy restart[/] (close attached sessions first)")
+    if provider == "headroom":
+        _refresh_snapshots(config)
+        if before != after:
+            console.print("  • restart proxies to run the new build: "
+                          "[cyan]mcpm compression proxy restart[/] (close attached sessions first)")
+    elif provider == "tokenade" and before != after and tk_hooks_present():
+        console.print("  • hooks were installed by the previous build — re-engage to "
+                      "refresh them: [cyan]mcpm compression enable --provider tokenade[/]")
 
 
 @compression.command(help="Declare the posture a live proxy is running, so an upgrade can't move it.")
@@ -421,8 +515,8 @@ def seal(preset_name: str | None, do_apply: bool) -> None:
 @click.option("--min-turns", type=int, default=5, show_default=True,
               help="Ignore sessions with fewer billed turns.")
 @click.option("--by-pin", is_flag=True,
-              help="Break the proxied bucket down by the headroom pin each session ran "
-                   "against (A/B by version).")
+              help="Break the optimized bucket down by the provider:pin each session ran "
+                   "against (A/B by provider and version).")
 def verify(limit: int | None, min_turns: int, by_pin: bool) -> None:
     paths = list(iter_transcripts())
     if limit:
@@ -444,8 +538,15 @@ def verify(limit: int | None, min_turns: int, by_pin: bool) -> None:
     table = Table(show_header=True, box=None)
     for col in ("bucket", "sessions", "turns", "read ratio", "read:write"):
         table.add_column(col)
+    if tk_hooks_present():
+        # Hooks apply to every session however launched, so while they are live the
+        # unattributed bucket is NOT an untouched baseline and `plain` can only contain
+        # pre-enable launches. A/B against baseline is time-sliced: enable vs disable.
+        err.print("  [yellow]![/] tokenade hooks are live (global): sessions since enable "
+                  "are optimized even when launched outside `run` — treat `unattributed` "
+                  "as contaminated for this period; A/B by time-slice, not per-launch.")
     for label, m, note in (
-        ("proxied", proxied, "through headroom"),
+        ("proxied", proxied, "optimized — ledgered launches"),
         ("plain", plain, "control — run, not routed"),
         ("unattributed", unattr, "baseline — predates the ledger"),
     ):
@@ -459,8 +560,8 @@ def verify(limit: int | None, min_turns: int, by_pin: bool) -> None:
     console.print(table)
 
     if not proxied.sessions:
-        console.print("\n  [yellow]![/] no proxied sessions yet — nothing to judge. "
-                      "Enable headroom, work through [cyan]hrclaude[/], then re-run.")
+        console.print("\n  [yellow]![/] no optimized sessions yet — nothing to judge. "
+                      "Enable a provider, work through [cyan]hrclaude[/], then re-run.")
         console.print(f"  [dim]baseline for comparison: "
                       f"{unattr.read_ratio:.1%} read ratio, {unattr.read_write:.2f}x "
                       f"over {unattr.sessions:,} sessions.[/]"
@@ -484,9 +585,9 @@ def verify(limit: int | None, min_turns: int, by_pin: bool) -> None:
         if not by:
             console.print("\n  [dim]--by-pin: no pin-tagged proxied sessions yet.[/]")
         else:
-            console.print("\n  [bold]proxied by pin[/] — A/B by headroom version:")
+            console.print("\n  [bold]optimized by provider:pin[/] — A/B by provider and version:")
             pin_table = Table(show_header=True, box=None)
-            for col in ("pin", "sessions", "turns", "read ratio", "read:write", "vs baseline"):
+            for col in ("provider:pin", "sessions", "turns", "read ratio", "read:write", "vs baseline"):
                 pin_table.add_column(col)
             for pin in sorted(by):
                 pm = measure(by[pin], min_turns=min_turns)
@@ -508,8 +609,9 @@ def verify(limit: int | None, min_turns: int, by_pin: bool) -> None:
                 console.print(f"  [dim]a pin earns re-enable only if it does not degrade vs "
                               f"baseline ({base_rw:.2f}x read:write).[/]")
     console.print("  [dim]source: provider-billed usage in Claude Code transcripts — "
-                  "never headroom's own /stats (its accounting was wrong four ways across "
-                  "0.28–0.31).[/]")
+                  "never a vendor's own savings numbers (headroom's accounting was wrong "
+                  "four ways across 0.28–0.31; tokenade's gain ledger is self-reported "
+                  "and unaudited).[/]")
     if not ok:
         raise SystemExit(1)
 
@@ -531,6 +633,7 @@ def doctor() -> None:
                    shutil.which("headroom") or "not on PATH"))
     checks.append(("rtk binary", shutil.which("rtk") is not None,
                    shutil.which("rtk") or "not on PATH (optional)"))
+    checks.extend(_tokenade_checks(config))
     pin = config.provider_version.pin
     if shutil.which("headroom"):
         v = hr_version()
@@ -563,22 +666,24 @@ def doctor() -> None:
         checks.append(("inert knobs", True, "every declared knob is read by this build"))
 
     # Unsealed: the live proxy holds a posture value we never declared, i.e. the vendor is
-    # deciding it. Needs a running proxy — /health is the only truthful source.
-    port = config.preset_for().port
-    live_cfg = cap_effective(port)
-    if not live_cfg:
-        checks.append(("sealed posture", True,
-                       f"no proxy on :{port} — start one and re-run to audit the live posture"))
-    else:
-        declarable, unset = split_unsealed(cap_unsealed(config.preset_for().knobs, port))
-        # Only `declarable` is actionable. `unset` is headroom's internal default, which no
-        # env value can express — warning about it forever would be noise you can't clear.
-        note = ("vendor-decided, declarable: "
-                + ", ".join(f"{k}={v}" for k, v in sorted(declarable.items()))
-                + " — run `seal --apply`") if declarable else "every declarable knob is policy"
-        if unset:
-            note += f"; {len(unset)} at headroom's internal default (unsealable, pinned)"
-        checks.append(("sealed posture", not declarable, note))
+    # deciding it. Needs a running proxy — /health is the only truthful source. Proxy
+    # checks only make sense for a proxy provider; a hook provider has no port to audit.
+    if config.provider == "headroom":
+        port = config.preset_for().port
+        live_cfg = cap_effective(port)
+        if not live_cfg:
+            checks.append(("sealed posture", True,
+                           f"no proxy on :{port} — start one and re-run to audit the live posture"))
+        else:
+            declarable, unset = split_unsealed(cap_unsealed(config.preset_for().knobs, port))
+            # Only `declarable` is actionable. `unset` is headroom's internal default, which no
+            # env value can express — warning about it forever would be noise you can't clear.
+            note = ("vendor-decided, declarable: "
+                    + ", ".join(f"{k}={v}" for k, v in sorted(declarable.items()))
+                    + " — run `seal --apply`") if declarable else "every declarable knob is policy"
+            if unset:
+                note += f"; {len(unset)} at headroom's internal default (unsealable, pinned)"
+            checks.append(("sealed posture", not declarable, note))
     health = get_provider(config.provider).health(config)
     checks.append(("engine reachable", bool(health.get("ok")), health.get("detail", "")))
     desired = get_provider(config.provider).mcp_server_config(config)
@@ -593,8 +698,14 @@ def doctor() -> None:
     else:
         checks.append(("MCP registered", True, "provider has no MCP server (ok)"))
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-    checks.append(("proxy env", base_url.endswith(str(config.preset_for().port)),
-                   base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
+    if config.provider == "headroom":
+        checks.append(("proxy env", base_url.endswith(str(config.preset_for().port)),
+                       base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
+    elif base_url:
+        # A hook provider must go direct — a leftover proxy URL would stack a dead (or
+        # worse, live) headroom proxy under tokenade's hooks.
+        checks.append(("proxy env", False,
+                       f"ANTHROPIC_BASE_URL={base_url} set under a non-proxy provider — unset it"))
     legacy = launchd_plist_path().exists()
     checks.append(("legacy plist", not legacy,
                    "none (on-demand wrapper)" if not legacy
@@ -606,6 +717,76 @@ def doctor() -> None:
     for name, ok, detail in checks:
         table.add_row(name, "[green]ok[/]" if ok else "[yellow]—[/]", detail)
     console.print(table)
+
+
+def _tokenade_checks(config) -> list:
+    """Doctor checks for the tokenade posture.
+
+    Run whenever tokenade is the provider OR its hooks/binary are present — hooks are
+    global runtime state, so a leftover engagement matters even under provider=none.
+    """
+    from .providers.tokenade_runtime import settings_path
+
+    engaged = tk_hooks_present()
+    active = config.provider == "tokenade"
+    live = tk_version()
+    if not (active or engaged or live):
+        return []
+    checks = []
+
+    tkpin = config.pin_for("tokenade").pin
+    checks.append(("tokenade version", live == tkpin,
+                   f"{live} == pin {tkpin}" if live == tkpin
+                   else f"{live or 'not on PATH'} ≠ pin {tkpin} — run "
+                        f"`pin --provider tokenade --install`"))
+
+    # Hooks must match policy in BOTH directions: enabled-but-absent means compression
+    # is a no-op; disabled-but-present means `none` is a lie and every session is still
+    # optimized (including on client repos context rules claim to exempt).
+    if active:
+        checks.append(("tokenade hooks", engaged,
+                       "live in settings.json" if engaged
+                       else "not installed — run `enable --provider tokenade`"))
+    else:
+        checks.append(("tokenade hooks", not engaged,
+                       "absent (provider is not tokenade)" if not engaged
+                       else "STILL PRESENT under provider="
+                            f"{config.provider} — run `mcpm compression disable`"))
+
+    if live:
+        checks.append(("tokenade self-updater", tk_updater_disabled(),
+                       "disabled (pin holds)" if tk_updater_disabled()
+                       else "ON — a 24h auto-updater silently moves the build off the "
+                            "pin; run `tokenade upgrade --off`"))
+
+    # MCP wrap drift: policy says unwrapped, but client configs still route MCP servers
+    # through `tokenade mcp-proxy` (fights mcpm client sync; varies the tool manifest).
+    if not config.tokenade.mcp_wrap:
+        claude_json = os.path.join(os.path.expanduser("~"), ".claude.json")
+        wrapped = False
+        try:
+            with open(claude_json) as fh:
+                wrapped = "mcp-proxy" in fh.read()
+        except OSError:
+            pass
+        checks.append(("tokenade MCP wrap", not wrapped,
+                       "no wrapped entries (policy: off)" if not wrapped
+                       else "wrapped entries in ~/.claude.json while policy says off — "
+                            "run `tokenade unwrap-mcps`"))
+
+    # Double compaction: rtk's Bash hook + tokenade's Bash-rewrite hook both firing
+    # wastes work and muddies attribution. Tokenade itself flags rtk as redundant.
+    if engaged:
+        rtk_hooked = False
+        try:
+            rtk_hooked = "rtk hook" in settings_path().read_text()
+        except OSError:
+            pass
+        checks.append(("rtk/tokenade overlap", not rtk_hooked,
+                       "no rtk hook alongside tokenade" if not rtk_hooked
+                       else "rtk hook still in settings.json — double compaction; let "
+                            "`tokenade install` migrate it or remove the rtk hook"))
+    return checks
 
 
 @compression.command(
@@ -653,12 +834,29 @@ def run(cwd: str, force: bool, claude_args: tuple) -> None:
     child_env = dict(os.environ)
     pin = config.provider_version.pin
 
-    def _launch(routed: bool):
+    def _launch(routed: bool, launch_pin: str | None = None, port: int | None = None):
         # The transcript records no endpoint, so this is the only moment anyone knows
-        # whether these turns went through the proxy. Log it, then hand over the TTY.
+        # whether these turns were optimized. Log it, then hand over the TTY.
         append_launch(cwd=cwd, provider=provider_name, preset=preset_name, routed=routed,
-                      port=preset.port if routed else None, pin=pin)
+                      port=port, pin=launch_pin if launch_pin is not None else pin)
         os.execvpe("claude", ["claude", *claude_args], child_env)
+
+    if provider_name == "tokenade":
+        # Hook runtime: nothing to start, no env to inject — the hooks in settings.json
+        # decide, globally. `routed` records reality (hooks live), not policy, and the
+        # recorded pin is the *installed* build, since that is what the hooks ran.
+        child_env.pop("ANTHROPIC_BASE_URL", None)
+        live = tk_version()
+        engaged = bool(live) and tk_hooks_present()
+        tkpin = config.pin_for("tokenade").pin
+        if engaged and live != tkpin:
+            # Unlike the proxy, there is no per-launch refusal: hooks apply to every
+            # session until removed. Say so instead of pretending a kill switch exists.
+            err.print(f"  [yellow]![/] tokenade {live} ≠ pin {tkpin} — hooks are global, "
+                      "this session runs the drifted build. Fix: [cyan]pin --install[/] "
+                      "or [cyan]disable[/].")
+        _launch(routed=engaged, launch_pin=live or tkpin)
+        return
 
     if provider_name == "headroom" and _DEFAULT_RUNTIME.get(provider_name) == "proxy":
         if not _pin_ok(config, force):
@@ -677,7 +875,7 @@ def run(cwd: str, force: bool, claude_args: tuple) -> None:
             _launch(routed=False)
             return
         child_env.update(env)
-        _launch(routed=True)
+        _launch(routed=True, port=preset.port)
         return
     # none / rtk-only → go direct (rtk's hook is global; no proxy).
     child_env.pop("ANTHROPIC_BASE_URL", None)
@@ -705,8 +903,14 @@ def proxy() -> None:
     pass
 
 
-def _active_port_env():
+def _active_port_env(*, starting: bool = False):
     config = load_config()
+    if starting and config.provider != "headroom":
+        # `down` may always clean up a leftover proxy, but starting one under a hook
+        # provider (tokenade/rtk) or none would route nothing and mislead `status`.
+        err.print(f"  [red]✗[/] provider is {config.provider} — the proxy lifecycle "
+                  "applies to headroom only")
+        raise SystemExit(1)
     preset = config.preset_for()
     env = get_provider("headroom").env_for_preset(config, preset)
     return preset.port, env
@@ -714,7 +918,7 @@ def _active_port_env():
 
 @proxy.command("up", help="Start the proxy for the active preset (if not already up).")
 def proxy_up_cmd() -> None:
-    port, env = _active_port_env()
+    port, env = _active_port_env(starting=True)
     ok, detail = hr_proxy_up(port, env)
     (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]"
                                          f"{'✓' if ok else '✗'}[/] {detail}")
@@ -730,7 +934,7 @@ def proxy_down_cmd() -> None:
 
 @proxy.command("restart", help="Restart the proxy (needed to change a cold-start mode).")
 def proxy_restart_cmd() -> None:
-    port, env = _active_port_env()
+    port, env = _active_port_env(starting=True)
     hr_proxy_down(port)
     ok, detail = hr_proxy_up(port, env)
     (console.print if ok else err.print)(f"  [{'green' if ok else 'red'}]"

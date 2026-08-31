@@ -5,8 +5,8 @@ from mcpm_compression.providers import get_provider, provider_names
 from mcpm_compression.schema import CompressionConfig, ContextRule
 
 
-def test01_registry_has_three_providers():
-    assert set(provider_names()) == {"headroom", "rtk-only", "none"}
+def test01_registry_has_four_providers():
+    assert set(provider_names()) == {"headroom", "tokenade", "rtk-only", "none"}
 
 
 def test02_headroom_mcp_and_runtime():

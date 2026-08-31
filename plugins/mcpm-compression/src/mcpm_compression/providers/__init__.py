@@ -7,9 +7,11 @@ from ..provider import CompressionProvider
 from .headroom import HeadroomProvider
 from .none import NoneProvider
 from .rtk import RtkOnlyProvider
+from .tokenade import TokenadeProvider
 
 _REGISTRY: Dict[str, Type[CompressionProvider]] = {
     HeadroomProvider.name: HeadroomProvider,
+    TokenadeProvider.name: TokenadeProvider,
     RtkOnlyProvider.name: RtkOnlyProvider,
     NoneProvider.name: NoneProvider,
 }

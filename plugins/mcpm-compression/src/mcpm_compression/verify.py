@@ -170,12 +170,14 @@ def partition(paths: Iterable[Path], launches: Optional[List[Dict]] = None) -> D
 
 def partition_by_pin(paths: Iterable[Path], launches: Optional[List[Dict]] = None
                      ) -> Dict[str, List[Path]]:
-    """Proxied sessions grouped by the headroom pin their launch ran against.
+    """Optimized sessions grouped by `provider:pin` their launch ran against.
 
-    Only sessions that actually routed appear; each is keyed by the `pin` its ledger launch
-    recorded (`unknown` when the launch predates pin tracking). This is what makes an A/B
-    legible: Arm A (0.29.0) and Arm B (0.32.0) land in separate buckets instead of blending
-    into one proxied number the way `partition` alone would leave them.
+    Only sessions that actually routed appear; each is keyed by the provider and `pin` its
+    ledger launch recorded (`unknown` when the launch predates pin tracking). This is what
+    makes an A/B legible: Arm A (headroom:0.29.0) and Arm B (tokenade:1.0.1) land in
+    separate buckets instead of blending into one number the way `partition` alone would
+    leave them. The provider is part of the key because pins from different ecosystems can
+    collide (headroom 1.0.x vs tokenade 1.0.x would otherwise merge).
     """
     from .ledger import attribute, read_launches
 
@@ -186,8 +188,8 @@ def partition_by_pin(paths: Iterable[Path], launches: Optional[List[Dict]] = Non
         match = attribute(start, cwd, recs)
         if match is None or not match.get("routed"):
             continue
-        pin = match.get("pin") or "unknown"
-        out.setdefault(pin, []).append(p)
+        key = f"{match.get('provider') or '?'}:{match.get('pin') or 'unknown'}"
+        out.setdefault(key, []).append(p)
     return out
 
 

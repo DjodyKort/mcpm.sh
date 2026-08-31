@@ -87,11 +87,14 @@ def _session_at(tmp_path, name, cwd, ts, turns=6, read=9000, create=300):
     return p
 
 
-def test07_partition_by_pin_groups_proxied_by_version(tmp_path):
+def test07_partition_by_pin_groups_proxied_by_provider_and_version(tmp_path):
     launches = [
-        {"ts": "2026-07-01T10:00:00+00:00", "cwd": "/work/a", "routed": True, "pin": "0.29.0"},
-        {"ts": "2026-07-01T11:00:00+00:00", "cwd": "/work/b", "routed": True, "pin": "0.32.0"},
-        {"ts": "2026-07-01T12:00:00+00:00", "cwd": "/work/c", "routed": False, "pin": "0.29.0"},
+        {"ts": "2026-07-01T10:00:00+00:00", "cwd": "/work/a", "routed": True,
+         "provider": "headroom", "pin": "0.29.0"},
+        {"ts": "2026-07-01T11:00:00+00:00", "cwd": "/work/b", "routed": True,
+         "provider": "tokenade", "pin": "1.0.1"},
+        {"ts": "2026-07-01T12:00:00+00:00", "cwd": "/work/c", "routed": False,
+         "provider": "headroom", "pin": "0.29.0"},
     ]
     a = _session_at(tmp_path, "a", "/work/a", "2026-07-01T10:00:02+00:00")
     b = _session_at(tmp_path, "b", "/work/b", "2026-07-01T11:00:02+00:00")
@@ -99,12 +102,12 @@ def test07_partition_by_pin_groups_proxied_by_version(tmp_path):
 
     by = partition_by_pin([a, b], launches=launches)
     by_all = partition_by_pin([a, b, tmp_path / "c.jsonl"], launches=launches)
-    assert by["0.29.0"] == [a] and by["0.32.0"] == [b]
-    assert set(by_all) == {"0.29.0", "0.32.0"}  # routed=False (plain) is excluded
+    assert by["headroom:0.29.0"] == [a] and by["tokenade:1.0.1"] == [b]
+    assert set(by_all) == {"headroom:0.29.0", "tokenade:1.0.1"}  # routed=False excluded
 
 
 def test08_partition_by_pin_labels_missing_pin_unknown(tmp_path):
     launches = [{"ts": "2026-07-01T10:00:00+00:00", "cwd": "/w", "routed": True}]  # no pin
     s = _session_at(tmp_path, "s", "/w", "2026-07-01T10:00:03+00:00")
     by = partition_by_pin([s], launches=launches)
-    assert list(by) == ["unknown"] and by["unknown"] == [s]
+    assert list(by) == ["?:unknown"] and by["?:unknown"] == [s]

@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 # Keys of transpilers that use append mode (single file for all agents)
 AGENT_APPEND_MODE_TRANSPILERS = {"roomodes"}
 
+# Transpilers whose output paths only make sense at project level.
+AGENT_PROJECT_ONLY_TRANSPILERS = {"vscode", "roomodes"}
+
 
 class BaseAgentTranspiler(abc.ABC):
     """Abstract base class for per-client agent transpilers."""
@@ -111,14 +114,33 @@ def sync_agents(
     client_keys: Optional[List[str]] = None,
     dry_run: bool = False,
     lockfile: Optional[LockFile] = None,
+    global_mode: bool = False,
 ) -> LockFile:
-    """Transpile all agents to target clients and write output files."""
+    """Transpile all agents to target clients and write output files.
+
+    Args:
+        agents: List of parsed AgentConfigs.
+        project_root: Root directory of the project (used for discovery).
+        client_keys: Specific clients to target. None = all registered.
+        dry_run: If True, compute results without writing files.
+        lockfile: Existing lockfile to extend. None starts a fresh one.
+        global_mode: If True, write to user-level paths (~/) instead of
+            project-level, and skip project-only transpilers.
+    """
     if lockfile is None:
         lockfile = LockFile.create_now()
+
+    output_root = Path.home() if global_mode else project_root
+    if global_mode:
+        lockfile.scope = "global"
+        lockfile.output_root = str(output_root)
 
     transpilers = get_all_agent_transpilers()
     if client_keys:
         transpilers = {k: v for k, v in transpilers.items() if k in client_keys}
+
+    if global_mode:
+        transpilers = {k: v for k, v in transpilers.items() if k not in AGENT_PROJECT_ONLY_TRANSPILERS}
 
     per_file = {k: v for k, v in transpilers.items() if k not in AGENT_APPEND_MODE_TRANSPILERS}
     append = {k: v for k, v in transpilers.items() if k in AGENT_APPEND_MODE_TRANSPILERS}
@@ -132,12 +154,18 @@ def sync_agents(
 
         for client_key, transpiler in per_file.items():
             try:
-                result = transpiler.transpile(agent, project_root)
+                result = transpiler.transpile(agent, output_root)
                 entry.clients_synced.append(client_key)
                 entry.warnings.extend(result.warnings)
                 if not dry_run:
                     result.output_path.parent.mkdir(parents=True, exist_ok=True)
                     result.output_path.write_text(result.content, encoding="utf-8")
+                try:
+                    entry.output_files.setdefault(client_key, []).append(
+                        str(result.output_path.relative_to(output_root))
+                    )
+                except ValueError:
+                    entry.output_files.setdefault(client_key, []).append(str(result.output_path))
             except Exception as e:
                 logger.warning(f"Failed to transpile agent {agent.name} for {client_key}: {e}")
                 entry.warnings.append(f"{client_key}: transpilation failed: {e}")
@@ -148,11 +176,16 @@ def sync_agents(
     for client_key, transpiler in append.items():
         try:
             if hasattr(transpiler, "transpile_all"):
-                result = transpiler.transpile_all(agents, project_root)
+                result = transpiler.transpile_all(agents, output_root)
                 for agent in agents:
                     if agent.name in lockfile.agents:
                         lockfile.agents[agent.name].clients_synced.append(client_key)
                         lockfile.agents[agent.name].warnings.extend(result.warnings)
+                        try:
+                            rel = str(result.output_path.relative_to(output_root))
+                        except ValueError:
+                            rel = str(result.output_path)
+                        lockfile.agents[agent.name].output_files.setdefault(client_key, []).append(rel)
                 if not dry_run:
                     result.output_path.parent.mkdir(parents=True, exist_ok=True)
                     result.output_path.write_text(result.content, encoding="utf-8")

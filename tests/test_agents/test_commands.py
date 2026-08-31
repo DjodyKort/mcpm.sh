@@ -1,9 +1,13 @@
 """Tests for agents CLI commands."""
 
+import json
+
 import pytest
 from click.testing import CliRunner
 
 from mcpm.commands.agents import agents
+from mcpm.skills.config import SkillsConfigManager
+from mcpm.skills.schema import LockFile, LockFileEntry
 
 
 @pytest.fixture
@@ -74,6 +78,73 @@ class TestSyncCommand:
         content = toml_file.read_text()
         assert 'name = "code-reviewer"' in content
         assert 'developer_instructions = """' in content
+
+    def test_sync_global_writes_to_home(self, runner, agents_repo, tmp_path, monkeypatch):
+        home_dir = tmp_path / "home"
+        home_dir.mkdir()
+        monkeypatch.setenv("HOME", str(home_dir))
+        result = runner.invoke(agents, ["sync", "--global", "--path", str(agents_repo)])
+        assert result.exit_code == 0
+        assert (home_dir / ".claude" / "agents" / "code-reviewer.md").exists()
+
+    def test_sync_global_skips_project_only(self, runner, agents_repo, tmp_path, monkeypatch):
+        home_dir = tmp_path / "home"
+        home_dir.mkdir()
+        monkeypatch.setenv("HOME", str(home_dir))
+        result = runner.invoke(agents, ["sync", "--global", "--path", str(agents_repo)])
+        assert result.exit_code == 0
+        assert not (home_dir / ".github").exists()
+        assert not (home_dir / ".roomodes").exists()
+
+    def test_sync_global_lockfile_location(self, runner, agents_repo, tmp_path, monkeypatch):
+        home_dir = tmp_path / "home"
+        home_dir.mkdir()
+        monkeypatch.setenv("HOME", str(home_dir))
+        result = runner.invoke(agents, ["sync", "--global", "--path", str(agents_repo)])
+        assert result.exit_code == 0
+        lock_path = home_dir / ".config" / "mcpm" / "mcpm-skills.lock"
+        assert lock_path.exists()
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert "code-reviewer" in data["agents"]
+        assert "simple-agent" in data["agents"]
+
+    def test_sync_global_preserves_skills_section(self, runner, agents_repo, tmp_path, monkeypatch):
+        home_dir = tmp_path / "home"
+        home_dir.mkdir()
+        monkeypatch.setenv("HOME", str(home_dir))
+
+        config_dir = home_dir / ".config" / "mcpm"
+        config_dir.mkdir(parents=True)
+        seeded = LockFile.create_now()
+        seeded.skills["some-skill"] = LockFileEntry(hash="sha256:deadbeef")
+        SkillsConfigManager(project_root=config_dir).save_lockfile(seeded)
+
+        result = runner.invoke(agents, ["sync", "--global", "--path", str(agents_repo)])
+        assert result.exit_code == 0
+
+        data = json.loads((config_dir / "mcpm-skills.lock").read_text(encoding="utf-8"))
+        assert "some-skill" in data["skills"]
+        assert "code-reviewer" in data["agents"]
+
+
+class TestCleanCommand:
+    def test_clean_removes_files(self, runner, agents_repo):
+        runner.invoke(agents, ["sync", "--path", str(agents_repo)])
+        assert (agents_repo / ".claude" / "agents" / "code-reviewer.md").exists()
+        assert (agents_repo / ".roomodes").exists()
+
+        result = runner.invoke(agents, ["clean", "--path", str(agents_repo)])
+        assert result.exit_code == 0
+        assert "cleaned" in result.output.lower()
+        assert not (agents_repo / ".claude" / "agents" / "code-reviewer.md").exists()
+        assert not (agents_repo / ".cursor" / "agents" / "code-reviewer.md").exists()
+        assert not (agents_repo / ".codex" / "agents" / "code-reviewer.toml").exists()
+        assert not (agents_repo / ".github" / "agents" / "code-reviewer.agent.md").exists()
+
+    def test_clean_no_lockfile(self, runner, tmp_path):
+        result = runner.invoke(agents, ["clean", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "no lockfile" in result.output.lower()
 
 
 class TestLintCommand:

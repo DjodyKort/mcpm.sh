@@ -156,3 +156,36 @@ class TestRooCodeAgent:
         assert "edit" in group_names
         assert "command" in group_names
         assert "mcp" in group_names
+
+
+class TestGlobalModeOutputPaths:
+    """Global agents sync roots every non-project-only transpiler at Path.home().
+
+    Each get_output_path() is a plain path join with no project-relative
+    assumptions baked in, so passing a home directory in place of a project
+    root must resolve exactly the same way it does for a project root.
+    """
+
+    def test_claude_code_output_path_under_home(self, tmp_path):
+        agent = _make_agent(tmp_path, "code-reviewer", SAMPLE_AGENT_MD)
+        home = tmp_path / "home"
+        path = ClaudeCodeAgentTranspiler().get_output_path(agent, home)
+        assert path == home / ".claude" / "agents" / "code-reviewer.md"
+
+    def test_cursor_output_path_under_home(self, tmp_path):
+        agent = _make_agent(tmp_path, "code-reviewer", SAMPLE_AGENT_MD)
+        home = tmp_path / "home"
+        path = CursorAgentTranspiler().get_output_path(agent, home)
+        assert path == home / ".cursor" / "agents" / "code-reviewer.md"
+
+    def test_codex_cli_output_path_under_home(self, tmp_path):
+        agent = _make_agent(tmp_path, "code-reviewer", SAMPLE_AGENT_MD)
+        home = tmp_path / "home"
+        path = CodexCliAgentTranspiler().get_output_path(agent, home)
+        assert path == home / ".codex" / "agents" / "code-reviewer.toml"
+
+    def test_gemini_cli_output_path_under_home(self, tmp_path):
+        agent = _make_agent(tmp_path, "code-reviewer", SAMPLE_AGENT_MD)
+        home = tmp_path / "home"
+        path = GeminiCliAgentTranspiler().get_output_path(agent, home)
+        assert path == home / ".gemini" / "agents" / "code-reviewer.md"

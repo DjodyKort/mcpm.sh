@@ -412,6 +412,17 @@ def sync_skills(
     lockfile.scope = "global" if global_mode else "project"
     lockfile.output_root = str(output_root)
 
+    # sync_skills only ever populates skills/rules -- agents, styles, and
+    # active_styles are owned by other sync paths (agents sync, styles
+    # apply). Starting from a fresh LockFile.create_now() and saving it
+    # straight over the existing lockfile would silently wipe those
+    # sections, so carry them forward from whatever the previous sync wrote.
+    previous = _load_previous_lockfile(output_root, project_root, global_mode)
+    if previous is not None:
+        lockfile.agents = previous.agents
+        lockfile.styles = previous.styles
+        lockfile.active_styles = previous.active_styles
+
     if client_keys:
         transpilers = {k: v for k, v in transpilers.items() if k in client_keys}
 
@@ -533,7 +544,6 @@ def sync_skills(
     # Stale-file cleanup: anything the previous lockfile recorded but that the
     # new sync did not produce has been renamed or removed upstream.
     cleaned: List[Path] = []
-    previous = _load_previous_lockfile(output_root, project_root, global_mode)
     if previous is not None:
         stale = _collect_stale_files(previous, lockfile, output_root)
         if stale and not dry_run:

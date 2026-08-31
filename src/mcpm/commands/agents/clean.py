@@ -53,7 +53,7 @@ def clean_agents(client, path, global_mode):
     total_removed = 0
     for client_key, transpiler in transpilers.items():
         try:
-            removed = transpiler.clean(clean_root, managed_skills=managed_names)
+            removed = transpiler.clean(clean_root, managed_agents=managed_names)
             for p in removed:
                 try:
                     display = p.relative_to(project_root)
@@ -62,7 +62,7 @@ def clean_agents(client, path, global_mode):
                 console.print(f"  [red]Removed[/] {display}")
             total_removed += len(removed)
         except Exception as e:
-            console.print(f"  [dim]Skipped {client_key}: {e}[/]")
+            console.print(f"  [red]Error cleaning {client_key}: {e}[/]")
 
     if total_removed:
         console.print(f"\n[green]Cleaned {total_removed} file(s).[/]")

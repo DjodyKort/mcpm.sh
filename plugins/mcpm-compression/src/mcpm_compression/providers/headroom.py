@@ -5,7 +5,7 @@ this module is the thin policy→env mapping.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..provider import CompressionProvider, GeneratedFile, RuntimeSpec
 from ..runtime import shell_env_snippet, shim_snippet
@@ -74,6 +74,23 @@ class HeadroomProvider(CompressionProvider):
                 mode=0o644,
                 note="source from ~/.zshrc for hrclaude/hrup/hrdown/hrstat (replaces headroom-aliases.zsh)",
             ),
+        ]
+
+    def deactivate(self, config: CompressionConfig, *, teardown: bool = False) -> List[Tuple[bool, str]]:
+        """Non-teardown disengage is already done: no artifacts, no MCP entry, nothing routed.
+
+        headroom only ever sees traffic a launch handed it, so removing the env snippet and
+        the MCP registration (both in `apply`) is the whole of turning it off. `--teardown`
+        additionally runs headroom's own documented removal.
+        """
+        if not teardown:
+            return []
+        from .headroom_runtime import mcp_uninstall, unwrap
+
+        return [
+            (ok, f"headroom mcp uninstall — {detail}") for ok, detail in [mcp_uninstall()]
+        ] + [
+            (ok, f"headroom unwrap claude — {detail}") for ok, detail in [unwrap("claude")]
         ]
 
     def health(self, config: CompressionConfig) -> dict:

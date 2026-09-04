@@ -54,6 +54,14 @@ class _FakeProvider:
     def health(self, config):
         return {"ok": True, "detail": ""}
 
+    # A provider that cannot engage itself: the ABC's no-ops, mirrored here so the double
+    # stays faithful to the interface apply() drives.
+    def activate(self, config):
+        return []
+
+    def deactivate(self, config, *, teardown=False):
+        return []
+
 
 def _headroom_like():
     art = GeneratedFile(path=_SNIPPET, content="# test\n", mode=0o600)

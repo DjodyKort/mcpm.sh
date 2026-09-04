@@ -15,7 +15,7 @@ mcpm compression update [--latest]       # bump the pin to newest (or --to X), i
 mcpm compression verify                  # measure real cache behaviour from Claude Code transcripts
 mcpm compression use agent               # switch the active preset
 mcpm compression set-provider rtk-only   # swap provider (lighter, no key-handling proxy)
-mcpm compression disable [--teardown]    # off (--teardown also runs headroom's own removal)
+mcpm compression disable [--teardown]    # off (--teardown also runs each provider's own removal)
 mcpm compression doctor                  # diagnose (pin drift, provenance, port, MCP)
 mcpm compression env --cwd <dir>         # resolved env for a dir (for `eval` in a shell)
 ```
@@ -30,7 +30,43 @@ all launch/lifecycle logic now lives in tested Python.
 ## Providers
 - **headroom** — full API proxy (compresses every tool result) + MCP retrieve/stats tools.
 - **rtk-only** — Bash/CLI-output compression via rtk's hook; no proxy, no API-key handling.
+- **parsec** — Dasein Labs' Claude Code plugin: hook-level re-read/command-loop blocking
+  plus its own local proxy and `scout` MCP tools. See below.
 - **none** — disabled.
+
+### parsec
+```
+mcpm compression enable --provider parsec    # install + enable the plugin
+mcpm compression status                       # plugin state, routing, version, key
+mcpm compression disable                      # off — reversible, keeps ~/.parsec
+mcpm compression disable --teardown           # also deletes ~/.parsec and its savings ledger
+```
+
+Read this before enabling it — parsec is a different *kind* of thing from headroom:
+
+| | headroom | parsec |
+| --- | --- | --- |
+| what it is | a binary mcpm starts | a Claude Code plugin Claude Code starts |
+| what it routes | only launches wrapped by `mcpm compression run` | **every** `claude` session |
+| how it routes | `ANTHROPIC_BASE_URL` in the launch env | `ANTHROPIC_BASE_URL` written into `~/.claude/settings.json` |
+| hooks | none | `PreToolUse` on Read/Bash, `PostToolUse` on Read/Bash/Edit/Write, SessionStart, Stop |
+| your agent | untouched | replaced with `parsec:code` (its own system prompt) |
+| source | open (PyPI wheel we pin exactly) | closed prebuilt binary, self-updating via marketplace |
+| off-machine | nothing (telemetry forced off) | your code leaves the machine on **every tier but Enterprise**: Pro sends chunk text + structural features to their scoring API, the free tier sends tokens "but never stored". A `psc_` key additionally reports savings to their dashboard |
+| price | — | list $40/mo, **$0 at the time of writing** (2026-09-02: the site strikes the price through and shows "Free"). Cost is not the axis to decide this on; the data flow above is |
+
+Because both providers claim `ANTHROPIC_BASE_URL`, they are mutually exclusive. Selecting
+another provider therefore *disables* parsec's plugin rather than merely not configuring it
+— its hooks would otherwise keep firing underneath. `doctor` has an **endpoint conflict**
+check for the case where parsec is still routing while the policy says something else.
+
+Not a replacement for `rtk-only`: parsec has no rtk in it. Its hook layer does a related
+job (blocking re-reads, breaking repeated commands) but by a different mechanism, and its
+own no-reread gate is off unless `PARSEC_NOREREAD=on`.
+
+parsec is **not pinned** the way headroom is — it self-updates through the Claude Code
+marketplace, so `CONTRACT_VERSION` in `parsec_runtime` is a marker the CLI reports drift
+against, not a constraint it enforces.
 
 ## Presets (headroom)
 A preset bundles headroom's knobs (`mode`, `savings_profile`, the Read-outliner, port) as

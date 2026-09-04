@@ -6,11 +6,13 @@ from typing import Dict, List, Type
 from ..provider import CompressionProvider
 from .headroom import HeadroomProvider
 from .none import NoneProvider
+from .parsec import ParsecProvider
 from .rtk import RtkOnlyProvider
 
 _REGISTRY: Dict[str, Type[CompressionProvider]] = {
     HeadroomProvider.name: HeadroomProvider,
     RtkOnlyProvider.name: RtkOnlyProvider,
+    ParsecProvider.name: ParsecProvider,
     NoneProvider.name: NoneProvider,
 }
 

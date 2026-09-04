@@ -27,10 +27,10 @@ process (read at launch), so the activation env is emitted for a thin shell wrap
 
 ## Modularity: two swap axes
 
-1. **Swap the provider** (headroom → future compressor). Seam = the
-   `CompressionProvider` ABC (`provider.py`). Every headroom-specific CLI/HTTP call is
-   confined to **one** adapter module, `providers/headroom_runtime.py`. A headroom
-   version bump or a provider swap touches that one file.
+1. **Swap the provider** (headroom ↔ parsec ↔ rtk-only ↔ none). Seam = the
+   `CompressionProvider` ABC (`provider.py`). Every provider-specific CLI/HTTP call is
+   confined to **one** adapter module per provider — `providers/headroom_runtime.py`,
+   `providers/parsec_runtime.py`. A version bump or a provider swap touches that one file.
 2. **Strip the whole layer.** `mcpm compression disable` removes our MCP presence +
    generated artifacts. Optional `--teardown` additionally runs headroom's documented
    removal. Policy is one deletable file. (headroom's own `~/.headroom/` data persists —
@@ -99,6 +99,82 @@ commands are used only at **config time** (snapshotting into our config), never 
 - Subagents inherit the parent's `ANTHROPIC_BASE_URL` ⇒ routing is per **launched**
   client/dir, not per subagent.
 
+## parsec — the second provider, and what it changed
+
+Contract verified at parsec **0.2.8** (`parsec_runtime.CONTRACT_VERSION`).
+
+parsec (Dasein Labs) is the first provider mcpm does not start. It is a Claude Code plugin
+that carries its own proxy, hooks, MCP server (`scout`) and session agent; Claude Code owns
+its lifecycle. That broke one assumption in the original seam and forced exactly one
+interface change.
+
+### The assumption it broke
+
+headroom, rtk-only and none are **inert until routed to** — describing them (artifacts +
+MCP presence) is the same act as activating them. parsec engages *itself*: from the moment
+its plugin is enabled, its `PreToolUse` hook runs on every Read and Bash regardless of what
+`compression.json` says. So `provider = headroom` could be true in the config and false on
+the machine, with parsec's hooks firing underneath headroom's proxy and neither set of
+numbers meaning anything.
+
+Hence `CompressionProvider.activate` / `.deactivate` — non-abstract, no-ops by default, so
+only a provider that can engage itself implements them. `sync.apply` engages the selected
+provider and **sweeps every unselected one**, which is the only reason "off" is actually
+off. A context rule naming a provider protects it from the sweep but never activates it: a
+per-directory setting must not install a machine-wide plugin.
+
+### Two engines, one endpoint
+
+Both providers claim `ANTHROPIC_BASE_URL`, so they are mutually exclusive — but not
+symmetrically:
+
+| | headroom | parsec |
+| --- | --- | --- |
+| endpoint written to | the launch env, per `run` | `~/.claude/settings.json` → `env` |
+| blast radius | the wrapped launch | every `claude` session on the machine |
+| survives a provider switch | no (we own the artifact) | **yes** — which is why the sweep exists |
+
+`doctor` carries an **endpoint conflict** check for the residual case: settings.json still
+routing to parsec while the policy names something else.
+
+### Integration contract (verified at 0.2.8)
+
+| Surface | Use | Note |
+| --- | --- | --- |
+| `~/.claude/plugins/installed_plugins.json` | is the plugin installed | file read, never a subprocess — `apply` asks on every run |
+| `~/.claude/settings.json` → `enabledPlugins` | is it on | same |
+| `~/.claude/settings.json` → `env.ANTHROPIC_BASE_URL` | is it routing, and where | ownership is not provable from the file; reported, never assumed |
+| `claude plugin install\|enable\|disable\|uninstall <id>` | the switch | `enable`/`disable` are the cheap reversible depth |
+| `parsec disable` | strip the managed settings.json keys | **must precede** disabling/removing the plugin |
+| `parsec uninstall` | stop proxy, delete `~/.parsec` | destructive: takes the savings ledger with it. `--teardown` only |
+| `GET <base>/health` | proxy liveness | the same probe parsec's own uninstall uses |
+
+Deliberately **not** used: the `curl … | bash` installer. It also offers to intercept Claude
+Desktop's TLS via mitmproxy and trust a CA in the System keychain — a sudo-level, whole-
+machine change unrelated to routing Claude Code, and not one mcpm should make for you.
+
+### What enabling it actually costs (recorded so it isn't re-litigated)
+
+- **Closed prebuilt binary**, self-updating through the marketplace. We cannot pin it the
+  way we pin headroom (`==<pin>` via uv); `CONTRACT_VERSION` is a drift marker the CLI
+  reports, not a constraint it enforces. Newer is still unverified.
+- **Global hooks**: the binary is executed on every Read, Bash, Edit, Write, SessionStart
+  and Stop.
+- **It replaces the session agent** (`"agent": "parsec:code"`), so it changes how the model
+  is instructed, not only how many tokens it is sent.
+- **Off-machine data on every tier but Enterprise.** Verbatim from their FAQ (2026-09-02):
+  "On the Pro tier, the local proxy sends chunk text and structural features to our scoring
+  API over TLS and gets keep/cut scores back… On the free tier, tokens are sent to us but
+  never stored." Only Enterprise reverses it (their scoring API deployed inside your cloud).
+  Model requests do keep using your own credentials and never route through them, and a
+  `psc_` key additionally reports savings to their dashboard — `health` reports whether a
+  key is configured and never reads its value.
+  Pricing is **not** the axis here: Pro lists at $40/mo and is currently struck through to
+  "Free", so the free/paid line does not gate whether your code is scored remotely.
+- **No rtk in it.** parsec's hook layer does a related job (blocking re-reads, breaking
+  repeated commands) but by a different mechanism, and its own no-reread gate is off unless
+  `PARSEC_NOREREAD=on`. It does not retire the `rtk-only` provider.
+
 ## `headroom_runtime` adapter (the swap seam)
 
 Single module `providers/headroom_runtime.py` — the only place that shells out to /
@@ -140,9 +216,14 @@ wrapper (which carries the full env). Revisit if headroom adds env injection.
 `mcpm compression disable [--teardown]`:
 1. Always: remove `mcpm_headroom` from clients + `servers.json`; remove the shell
    snippet; clean up any legacy launchd plist left by older versions.
-2. `--teardown` also: `headroom mcp uninstall` + `headroom unwrap claude` (best-effort,
-   reported).
-3. Residue: `~/.headroom/` (toin/savings/memory) is left in place — documented, not ours.
+2. Always: sweep every provider that can engage itself (`deactivate`). For parsec that is
+   `parsec disable` (strip the settings.json keys) then `claude plugin disable` — cheap and
+   reversible, `~/.parsec` untouched.
+3. `--teardown` also runs each provider's own removal: headroom's `mcp uninstall` +
+   `unwrap claude`, and parsec's `uninstall` (deletes `~/.parsec`, **including its savings
+   ledger**) followed by `claude plugin uninstall`. Order is load-bearing for parsec — the
+   cleanup binary ships inside the plugin, so the plugin is removed last.
+4. Residue: `~/.headroom/` (toin/savings/memory) is left in place — documented, not ours.
 
 ## Sync
 

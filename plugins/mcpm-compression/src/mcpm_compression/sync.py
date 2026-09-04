@@ -13,7 +13,7 @@ from .mcp_presence import (
     remove_from_clients,
     remove_mcp_server,
 )
-from .providers import get_provider
+from .providers import get_provider, provider_names
 from .runtime import launchd_plist_path
 from .runtime.shell import SHELL_SNIPPET_PATH
 from .schema import CompressionConfig
@@ -83,8 +83,43 @@ def _remove_managed_artifacts(report: ApplyReport) -> None:
                 report.warn(f"could not remove {path}: {e}")
 
 
-def apply(config: CompressionConfig, *, persist: bool = True) -> ApplyReport:
-    """Make the world match `config`. Safe to run repeatedly."""
+def _selected(config: CompressionConfig) -> set:
+    """Providers this policy can route to: the global one plus any named by a context rule.
+
+    A context rule counts as selection for the *sweep* but not for activation. Turning a
+    provider off because one directory rule mentions it would break that rule; installing a
+    Claude Code plugin because one directory rule mentions it is a machine-wide side effect
+    no per-directory setting should have. So rules protect, and only the global provider
+    engages.
+    """
+    return {config.provider} | {r.provider for r in config.contexts if r.provider}
+
+
+def _switch_providers(config: CompressionConfig, report: ApplyReport, *, teardown: bool) -> None:
+    """Engage the selected provider and disengage every provider that isn't selected.
+
+    The sweep exists because parsec engages itself: its hooks run on every Read and Bash
+    from the moment its plugin is enabled, whatever `compression.json` says. Without this,
+    `set-provider headroom` would leave parsec's hooks firing underneath headroom's proxy
+    and neither number would mean anything. Providers that cannot self-engage inherit a
+    no-op `deactivate`, so this is free for them.
+    """
+    keep = _selected(config)
+    for ok, detail in get_provider(config.provider).activate(config):
+        (report.add if ok else report.warn)(detail)
+    for name in provider_names():
+        if name in keep:
+            continue
+        for ok, detail in get_provider(name).deactivate(config, teardown=teardown):
+            (report.add if ok else report.warn)(detail)
+
+
+def apply(config: CompressionConfig, *, persist: bool = True, teardown: bool = False) -> ApplyReport:
+    """Make the world match `config`. Safe to run repeatedly.
+
+    `teardown` is the destructive depth for the providers being switched off (their own
+    data, not just our wiring). Only `disable --teardown` sets it.
+    """
     report = ApplyReport()
     _materialize_presets(config, report)  # config-time env snapshot, before persist
     if persist:
@@ -130,9 +165,16 @@ def apply(config: CompressionConfig, *, persist: bool = True) -> ApplyReport:
         os.chmod(art.path, art.mode)
         report.add(f"wrote {art.path}" + (f"  ({art.note})" if art.note else ""))
 
+    # 3. Providers that run themselves: engage the selected one, disengage the rest.
+    _switch_providers(config, report, teardown=teardown)
+
     return report
 
 
-def disable() -> ApplyReport:
-    """Tear down: provider=none, remove MCP entry + artifacts."""
-    return apply(CompressionConfig(provider="none", runtime="none"))
+def disable(*, teardown: bool = False) -> ApplyReport:
+    """Tear down: provider=none, remove MCP entry + artifacts.
+
+    `teardown` additionally runs each provider's own removal (headroom's `mcp uninstall` +
+    `unwrap`, parsec's `uninstall` + plugin removal).
+    """
+    return apply(CompressionConfig(provider="none", runtime="none"), teardown=teardown)

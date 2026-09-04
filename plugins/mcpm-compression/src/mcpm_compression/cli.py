@@ -39,7 +39,7 @@ console = Console()
 err = Console(stderr=True)
 
 # Provider → default runtime, so `enable` infers a sane runtime when omitted.
-_DEFAULT_RUNTIME = {"headroom": "proxy", "rtk-only": "hook", "none": "none"}
+_DEFAULT_RUNTIME = {"headroom": "proxy", "rtk-only": "hook", "parsec": "plugin", "none": "none"}
 
 
 def _print_report(report) -> None:
@@ -50,7 +50,7 @@ def _print_report(report) -> None:
 
 
 @click.group(
-    help="Manage the swappable context-compression layer (headroom / rtk-only / none).",
+    help="Manage the swappable context-compression layer (headroom / rtk-only / parsec / none).",
     context_settings=dict(help_option_names=["-h", "--help"]),
 )
 def compression() -> None:
@@ -87,6 +87,23 @@ def status() -> None:
             # 0.31 was newer than 0.27 and shipped a measured cache-busting regression.
             table.add_row("headroom", f"[red]{v} ≠ pin {pin}[/] — run "
                           f"[cyan]mcpm compression pin --install[/]")
+    if config.provider == "parsec":
+        from .providers import parsec_runtime as pr
+
+        table.add_row("plugin", f"[green]{pr.PLUGIN_ID} enabled[/]" if health.get("enabled")
+                      else (f"[yellow]installed but disabled[/]" if health.get("installed")
+                            else "[red]not installed[/]"))
+        # The row that matters: parsec routes from settings.json, so it routes *everything*,
+        # including sessions never launched through `mcpm compression run`.
+        table.add_row("routing", f"{health['routed']} [dim](all claude sessions)[/]"
+                      if health.get("routed") else "[dim]none in ~/.claude/settings.json[/]")
+        v = health.get("version")
+        table.add_row("parsec", f"[green]{v}[/] (verified contract)" if v == pr.CONTRACT_VERSION
+                      else (f"[yellow]{v} ≠ verified {pr.CONTRACT_VERSION}[/]" if v
+                            else "[dim]binary not found[/]"))
+        table.add_row("dashboard key", "configured — savings are reported to getparsec.ai"
+                      if health.get("api_key") else "[dim]none — local ledger only[/]")
+
     desired = provider.mcp_server_config(config)
     mcp_name = desired["name"] if desired else None
     if mcp_name:
@@ -138,6 +155,13 @@ def enable(provider_name: str, port: int | None, telemetry: str | None,
     report = apply(config)
     _print_report(report)
     console.print("\n[bold]Next steps:[/]")
+    if provider_name == "parsec":
+        console.print("  • restart claude — parsec writes ANTHROPIC_BASE_URL into "
+                      "~/.claude/settings.json at session start, which routes [bold]every[/] "
+                      "claude session (not just `mcpm compression run`)")
+        console.print("  • key (optional, for the dashboard): [cyan]/parsec:key[/] in a session")
+        console.print("  • off again: [cyan]mcpm compression disable[/]  "
+                      "(reversible; --teardown also deletes ~/.parsec and its savings ledger)")
     if provider_name == "headroom":
         console.print(f"  • add to ~/.zshrc: [cyan]source {SHIMS_PATH}[/]  "
                       "(hrclaude/hrup/hrdown — replaces headroom-aliases.zsh)")
@@ -148,17 +172,15 @@ def enable(provider_name: str, port: int | None, telemetry: str | None,
 
 @compression.command(help="Disable compression (remove MCP entry + artifacts).")
 @click.option("--teardown", is_flag=True,
-              help="Also run headroom's own removal (mcp uninstall + unwrap claude).")
+              help="Also run each provider's own removal (headroom: mcp uninstall + unwrap; "
+                   "parsec: uninstall + plugin removal — deletes ~/.parsec and its ledger).")
 def disable(teardown: bool) -> None:
     console.print("[bold]Disabling compression[/]")
-    report = do_disable()
+    # Every provider that can engage itself is disengaged here, not just the configured one:
+    # parsec's hooks keep firing while its plugin is enabled, whatever the config says.
+    report = do_disable(teardown=teardown)
     _print_report(report)
     if teardown:
-        from .providers.headroom_runtime import mcp_uninstall, unwrap
-        for label, (ok, detail) in [("headroom mcp uninstall", mcp_uninstall()),
-                                     ("headroom unwrap claude", unwrap("claude"))]:
-            (console.print if ok else err.print)(f"  [{'green' if ok else 'yellow'}]"
-                                                  f"{'✓' if ok else '!'}[/] {label} — {detail}")
         console.print("  [dim]Note: ~/.headroom/ data (toin/savings/memory) is left in place.[/]")
     if launchd_plist_path().exists():
         console.print(f"\n  Note: a legacy launchd job may still be loaded — remove with "
@@ -531,6 +553,27 @@ def doctor() -> None:
                    shutil.which("headroom") or "not on PATH"))
     checks.append(("rtk binary", shutil.which("rtk") is not None,
                    shutil.which("rtk") or "not on PATH (optional)"))
+
+    from .providers import parsec_runtime as pr
+
+    parsec_routed = pr.routed_base_url()
+    if pr.present() or config.provider == "parsec":
+        checks.append(("parsec plugin", pr.plugin_enabled(),
+                       f"{pr.PLUGIN_ID} enabled" if pr.plugin_enabled()
+                       else ("installed but disabled" if pr.plugin_installed()
+                             else "not installed")))
+        pv = pr.version()
+        checks.append(("parsec version", pv == pr.CONTRACT_VERSION,
+                       f"{pv} == verified contract" if pv == pr.CONTRACT_VERSION
+                       else f"{pv or 'binary not found'} ≠ verified {pr.CONTRACT_VERSION} — "
+                            "re-check the plugin's hooks/manifest"))
+    # Two engines, one endpoint. parsec routes from ~/.claude/settings.json, so it survives
+    # a provider switch that only rewrote our own artifacts — and then every claude session
+    # goes through an engine the policy says is off. This is the check that catches it.
+    if parsec_routed and config.provider != "parsec":
+        checks.append(("endpoint conflict", False,
+                       f"settings.json routes every claude session to {parsec_routed} (parsec) "
+                       f"while provider={config.provider} — run `mcpm compression sync`"))
     pin = config.provider_version.pin
     if shutil.which("headroom"):
         v = hr_version()
@@ -592,9 +635,16 @@ def doctor() -> None:
                        ", ".join(clients) if clients else "not in any client config"))
     else:
         checks.append(("MCP registered", True, "provider has no MCP server (ok)"))
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-    checks.append(("proxy env", base_url.endswith(str(config.preset_for().port)),
-                   base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
+    if config.provider == "parsec":
+        # parsec's endpoint is a settings.json key, never this process's env, so reading
+        # os.environ here would report "unset" on a perfectly routed machine.
+        checks.append(("proxy env", bool(parsec_routed),
+                       f"{parsec_routed} (settings.json, all sessions)" if parsec_routed
+                       else "no ANTHROPIC_BASE_URL yet — restart claude to let parsec write it"))
+    else:
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+        checks.append(("proxy env", base_url.endswith(str(config.preset_for().port)),
+                       base_url or "ANTHROPIC_BASE_URL unset (launch via wrapper)"))
     legacy = launchd_plist_path().exists()
     checks.append(("legacy plist", not legacy,
                    "none (on-demand wrapper)" if not legacy

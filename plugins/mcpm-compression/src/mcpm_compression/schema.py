@@ -11,8 +11,11 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-ProviderName = Literal["headroom", "rtk-only", "none"]
-RuntimeKind = Literal["proxy", "hook", "none"]
+ProviderName = Literal["headroom", "rtk-only", "parsec", "none"]
+# "plugin" = the engine is a Claude Code plugin: it carries its own proxy, hooks and MCP
+# server, and Claude Code — not mcpm — owns its lifecycle. Distinct from "proxy" precisely
+# so `compression proxy up|down` cannot mistake it for something it can start or stop.
+RuntimeKind = Literal["proxy", "hook", "plugin", "none"]
 CompressionMode = Literal["cache", "token"]
 
 DEFAULT_PORT = 8787

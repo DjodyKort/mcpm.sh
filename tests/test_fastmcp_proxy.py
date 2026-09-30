@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from mcpm.core.schema import CustomServerConfig, RemoteServerConfig, STDIOServerConfig
-from mcpm.fastmcp_integration.proxy import MCPMProxyFactory
+from mcpm.fastmcp_integration.proxy import MCPMProxyFactory, joined_instructions
 
 
 class TestFastMCPProxy:
@@ -18,7 +18,7 @@ class TestFastMCPProxy:
             name="test-stdio", command="python", args=["-m", "test_server"], env={"API_KEY": "test123"}
         )
 
-        factory = MCPMProxyFactory()
+        factory = MCPMProxyFactory(instructions_probe=None)
         with patch("mcpm.fastmcp_integration.proxy.FastMCP") as mock_fastmcp:
             mock_proxy = Mock()
             mock_fastmcp.as_proxy.return_value = mock_proxy
@@ -45,7 +45,7 @@ class TestFastMCPProxy:
             name="test-remote", url="https://api.example.com/mcp", headers={"Authorization": "Bearer token123"}
         )
 
-        factory = MCPMProxyFactory()
+        factory = MCPMProxyFactory(instructions_probe=None)
         with patch("mcpm.fastmcp_integration.proxy.FastMCP") as mock_fastmcp:
             mock_proxy = Mock()
             mock_fastmcp.as_proxy.return_value = mock_proxy
@@ -71,7 +71,7 @@ class TestFastMCPProxy:
         }
         server = CustomServerConfig(name="test-custom", config=custom_config)
 
-        factory = MCPMProxyFactory()
+        factory = MCPMProxyFactory(instructions_probe=None)
 
         # This should raise an exception since CustomServerConfig is skipped
         # and no supported servers remain for the proxy
@@ -87,7 +87,7 @@ class TestFastMCPProxy:
             CustomServerConfig(name="custom-server", config={"special": "config"}),
         ]
 
-        factory = MCPMProxyFactory()
+        factory = MCPMProxyFactory(instructions_probe=None)
         with patch("mcpm.fastmcp_integration.proxy.FastMCP") as mock_fastmcp:
             mock_proxy = Mock()
             mock_fastmcp.as_proxy.return_value = mock_proxy
@@ -113,7 +113,7 @@ class TestFastMCPProxy:
         server = STDIOServerConfig(name="test", command="test")
 
         # Create factory with auth enabled
-        factory = MCPMProxyFactory(auth_enabled=True, api_key="secret")
+        factory = MCPMProxyFactory(auth_enabled=True, api_key="secret", instructions_probe=None)
 
         with patch("mcpm.fastmcp_integration.proxy.FastMCP") as mock_fastmcp:
             mock_proxy = Mock()
@@ -133,7 +133,7 @@ class TestFastMCPProxy:
         server = RemoteServerConfig(name="test", url="http://example.com")
 
         # Create factory with auth enabled
-        factory = MCPMProxyFactory(auth_enabled=True, api_key="secret")
+        factory = MCPMProxyFactory(auth_enabled=True, api_key="secret", instructions_probe=None)
 
         with patch("mcpm.fastmcp_integration.proxy.FastMCP") as mock_fastmcp:
             mock_proxy = Mock()
@@ -146,3 +146,45 @@ class TestFastMCPProxy:
             # Check that auth middleware WAS added
             middleware_types = [type(call[0][0]).__name__ for call in mock_proxy.add_middleware.call_args_list]
             assert "MCPMAuthMiddleware" in middleware_types
+
+
+class TestBackendInstructions:
+    """FastMCP.as_proxy drops a backend's instructions; the factory passes them on."""
+
+    @staticmethod
+    def _probe(answers):
+        asked = []
+
+        async def probe(name, config):
+            asked.append(name)
+            return answers.get(name)
+
+        return probe, asked
+
+    @pytest.mark.asyncio
+    async def test_a_single_server_keeps_its_instructions_verbatim(self):
+        probe, _ = self._probe({"odh": "Use odoo_psql instead of psql."})
+        factory = MCPMProxyFactory(instructions_probe=probe)
+        proxy = await factory.create_proxy_for_servers([STDIOServerConfig(name="odh", command="odh-mcp")], "odh")
+        assert proxy.instructions == "Use odoo_psql instead of psql."
+
+    @pytest.mark.asyncio
+    async def test_a_profile_joins_each_server_under_its_name(self):
+        probe, _ = self._probe({"a": "Tools for A.", "c": "Tools for C."})
+        servers = [STDIOServerConfig(name=name, command=name) for name in ("a", "b", "c")]
+        proxy = await MCPMProxyFactory(instructions_probe=probe).create_proxy_for_servers(servers, "p")
+        assert proxy.instructions == "## a\nTools for A.\n\n## c\nTools for C."
+
+    @pytest.mark.asyncio
+    async def test_a_remote_server_is_not_probed(self):
+        probe, asked = self._probe({})
+        servers = [
+            STDIOServerConfig(name="local", command="local"),
+            RemoteServerConfig(name="remote", url="https://example.com/mcp"),
+        ]
+        await MCPMProxyFactory(instructions_probe=probe).create_proxy_for_servers(servers, "p")
+        assert asked == ["local"]
+
+    def test_no_instructions_anywhere_leave_none(self):
+        assert joined_instructions({"a": None}) is None
+        assert joined_instructions({"a": None, "b": ""}) is None

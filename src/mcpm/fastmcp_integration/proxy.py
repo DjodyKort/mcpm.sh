@@ -2,10 +2,12 @@
 FastMCP proxy factory for MCPM server aggregation.
 """
 
+import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
-from fastmcp import FastMCP
+from fastmcp import Client, FastMCP
+from fastmcp.client.transports import StdioTransport
 from fastmcp.mcp_config import MCPConfig, RemoteMCPServer, StdioMCPServer
 
 from mcpm.core.schema import CustomServerConfig, RemoteServerConfig, ServerConfig, STDIOServerConfig
@@ -18,6 +20,38 @@ from .middleware import MCPMAuthMiddleware, MCPMUnifiedTrackingMiddleware
 
 logger = logging.getLogger(__name__)
 
+# A backend that takes longer to answer its handshake is proxied without its
+# instructions rather than holding up the client's own handshake.
+INSTRUCTIONS_TIMEOUT_S = 30.0
+
+InstructionsProbe = Callable[[str, StdioMCPServer], Awaitable[Optional[str]]]
+
+
+async def stdio_instructions(name: str, server: StdioMCPServer) -> Optional[str]:
+    """The instructions a stdio backend sends in its handshake.
+
+    FastMCP.as_proxy answers the client's handshake itself and leaves them out,
+    so a client behind `mcpm run` would never see them. The backend is started
+    once for this and stopped again.
+    """
+    transport = StdioTransport(
+        command=server.command, args=server.args, env=server.env, cwd=server.cwd, keep_alive=False
+    )
+    try:
+        async with asyncio.timeout(INSTRUCTIONS_TIMEOUT_S), Client(transport) as client:
+            return client.initialize_result.instructions
+    except (OSError, RuntimeError, TimeoutError) as exc:
+        logger.warning(f"No instructions from '{name}': {exc}")
+        return None
+
+
+def joined_instructions(found: Dict[str, Optional[str]]) -> Optional[str]:
+    """One server's instructions as they are; several under their names."""
+    present = {name: text for name, text in found.items() if text}
+    if len(found) == 1:
+        return next(iter(present.values()), None)
+    return "\n\n".join(f"## {name}\n{text}" for name, text in present.items()) or None
+
 
 class MCPMProxyFactory:
     """Factory for creating FastMCP proxies with MCPM integration."""
@@ -27,6 +61,7 @@ class MCPMProxyFactory:
         auth_enabled: bool = False,
         api_key: Optional[str] = None,
         access_monitor: Optional[AccessMonitor] = None,
+        instructions_probe: Optional[InstructionsProbe] = stdio_instructions,
     ):
         """
         Initialize the proxy factory.
@@ -35,9 +70,12 @@ class MCPMProxyFactory:
             auth_enabled: Whether authentication is enabled.
             api_key: The API key to use for authentication.
             access_monitor: Access monitor for tracking. If None, creates DuckDBMonitor.
+            instructions_probe: Reads a stdio backend's instructions for the proxy
+                to pass on; None leaves the proxy without any.
         """
         self.auth_enabled = auth_enabled
         self.api_key = api_key
+        self.instructions_probe = instructions_probe
 
         if access_monitor is None:
             access_monitor = SQLiteAccessMonitor()
@@ -113,6 +151,7 @@ class MCPMProxyFactory:
         proxy_config = MCPConfig(mcpServers=server_configs)
 
         proxy = FastMCP.as_proxy(proxy_config, name=name or "mcpm-aggregated")
+        proxy.instructions = await self._backend_instructions(server_configs)
 
         # Add MCPM middleware
         # For single server proxies, use the server name for tracking
@@ -140,6 +179,15 @@ class MCPMProxyFactory:
         return await self.create_proxy_for_servers(
             profile_servers, name=f"mcpm-profile-{profile_name}", stdio_mode=stdio_mode
         )
+
+    async def _backend_instructions(self, server_configs: Dict[str, StdioMCPServer | RemoteMCPServer]) -> Optional[str]:
+        """The stdio backends' instructions, read side by side. Remote ones are
+        not probed: connecting may start an OAuth flow."""
+        stdio = {name: config for name, config in server_configs.items() if isinstance(config, StdioMCPServer)}
+        if self.instructions_probe is None or not stdio:
+            return None
+        texts = await asyncio.gather(*(self.instructions_probe(name, config) for name, config in stdio.items()))
+        return joined_instructions(dict(zip(stdio, texts)))
 
     def _add_mcpm_middleware(
         self,

@@ -9,6 +9,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StdioTransport
 from fastmcp.mcp_config import MCPConfig, RemoteMCPServer, StdioMCPServer
+from fastmcp.server import create_proxy
 
 from mcpm.core.schema import CustomServerConfig, RemoteServerConfig, ServerConfig, STDIOServerConfig
 from mcpm.monitor.base import AccessMonitor, SessionTransport
@@ -39,7 +40,7 @@ async def stdio_instructions(name: str, server: StdioMCPServer) -> Optional[str]
     )
     try:
         async with asyncio.timeout(INSTRUCTIONS_TIMEOUT_S), Client(transport) as client:
-            return client.initialize_result.instructions
+            return client.instructions
     except (OSError, RuntimeError, TimeoutError) as exc:
         logger.warning(f"No instructions from '{name}': {exc}")
         return None
@@ -150,7 +151,7 @@ class MCPMProxyFactory:
         # Create the proxy configuration dictionary directly
         proxy_config = MCPConfig(mcpServers=server_configs)
 
-        proxy = FastMCP.as_proxy(proxy_config, name=name or "mcpm-aggregated")
+        proxy = create_proxy(proxy_config, mode="auto", name=name or "mcpm-aggregated")
         proxy.instructions = await self._backend_instructions(server_configs)
 
         # Add MCPM middleware

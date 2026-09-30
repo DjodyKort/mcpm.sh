@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
-from typing import Iterable, Optional
+from typing import AsyncIterator, Iterable, Optional
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -78,16 +79,13 @@ def build_app(
 
     middleware = [Middleware(RequireMcpmToken, token=token)]
 
-    async def on_startup() -> None:
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         await supervisor.start()
         logger.info("router app started with %d routed server(s)", len(routed_names))
+        try:
+            yield
+        finally:
+            await supervisor.shutdown()
 
-    async def on_shutdown() -> None:
-        await supervisor.shutdown()
-
-    return Starlette(
-        routes=routes,
-        middleware=middleware,
-        on_startup=[on_startup],
-        on_shutdown=[on_shutdown],
-    )
+    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)

@@ -6,7 +6,7 @@ from typing import Any, Optional
 import requests
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import ListPromptsResult, ListResourcesResult, ListToolsResult
 
 DOCKER_HUB_REPO_URL = "https://hub.docker.com/v2/repositories/"
@@ -35,7 +35,7 @@ class McpClient:
         try:
             tools_result = await self.session.list_tools()
             return tools_result
-        except McpError:
+        except MCPError:
             return ListToolsResult(tools=[])
 
     async def list_prompts(self):
@@ -43,7 +43,7 @@ class McpClient:
         try:
             prompts_result = await self.session.list_prompts()
             return prompts_result
-        except McpError:
+        except MCPError:
             return ListPromptsResult(prompts=[])
 
     async def list_resources(self):
@@ -51,7 +51,7 @@ class McpClient:
         try:
             resources_result = await self.session.list_resources()
             return resources_result
-        except McpError:
+        except MCPError:
             return ListResourcesResult(resources=[])
 
     async def close(self):

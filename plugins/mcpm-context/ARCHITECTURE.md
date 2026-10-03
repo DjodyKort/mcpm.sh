@@ -73,7 +73,7 @@ A profile is a generated stand-in for `~/.claude`:
 | `commands/`, `skills/`, `agents/` | dir symlinks into `~/.claude` (shared, stay fresh) |
 | `settings.json` | composed **copy** (symlink would let cf's jq merge write through): base ∪ profile-accumulated ∪ `settings_overrides` (arrays = ordered union). Base hash tracked for doctor staleness. |
 | `.claude.json` | merged in place: identity keys (`oauthAccount`, `userID` — gated by `copy_auth`) + onboarding flags + `mcpServers` (`inherit` = mirror minus legacy · list = shaped via `ClaudeCodeManager(config_path_override=…).to_client_format()` · `none`). Claude Code's own accumulated state is preserved. |
-| shim | `claude-<name>() { _mcpm_context_presync; CLAUDE_CONFIG_DIR="<dir>" command claude "$@"; }` — `command claude` prevents wrapper recursion. |
+| shim | `claude-<name>() { mcpm_context_presync; CLAUDE_CONFIG_DIR="<dir>" command claude "$@"; }` — `command claude` prevents wrapper recursion. |
 
 ### Auth: one-time /login per profile (empirical, Claude Code 2.1.202 / macOS)
 
@@ -93,7 +93,7 @@ automatically, the shims file replaces the default `claude()` — and
 cf-dev-tools' own wrapper:
 
 ```
-_mcpm_context_presync:
+mcpm_context_presync:
   1. cf org sync   — cf's exact python entry points (sync_claude_files +
                      auto_update_mcp_repos), cf's own throttle cache
                      (~/.claude/.last_auto_sync, CLAUDE_SYNC_INTERVAL)
@@ -105,6 +105,11 @@ Verified live: cf clobber (allow 95→4) + one wrapped `claude --version` →
 allow back to 95 in the same invocation.
 
 Notes:
+- The helper has no leading underscore on purpose: Claude Code's shell snapshot
+  drops `_`-prefixed functions, so `claude …` run from its Bash tool would fail
+  with "command not found".
+- A failed `mcpm context sync` prints a warning and leaves the throttle stamp
+  untouched, so the next launch retries instead of staying silent for 4h.
 - `hrclaude` calls `mcpm compression run`, which spawns the claude *binary* —
   it never passed through cf's shell function, so wrapping it actually adds
   org-sync freshness that daily `hrclaude` use previously missed.

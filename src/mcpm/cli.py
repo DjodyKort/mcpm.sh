@@ -222,11 +222,24 @@ def _load_plugins():
         plugin_eps = eps.select(group="mcpm.plugins") if hasattr(eps, "select") else eps.get("mcpm.plugins", [])
         for ep in plugin_eps:
             try:
-                main.add_command(ep.load(), name=ep.name)
+                plugin = ep.load()
+                _use_core_help_options(plugin)
+                main.add_command(plugin, name=ep.name)
             except Exception as e:
                 err_console.print(f"[red]Failed to load plugin '{ep.name}': {e}[/]")
     except Exception:
         pass
+
+
+def _use_core_help_options(command) -> None:
+    """Give every plugin command core's ``-h``/``--help`` pair.
+
+    Without it ``-h`` is an unknown option on plugin commands, and pass-through
+    commands such as ``compression run`` hand it to the program they exec.
+    """
+    command.context_settings.setdefault("help_option_names", ["-h", "--help"])
+    for sub_command in getattr(command, "commands", {}).values():
+        _use_core_help_options(sub_command)
 
 
 _load_plugins()

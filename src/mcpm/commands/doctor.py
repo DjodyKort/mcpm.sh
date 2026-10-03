@@ -1,10 +1,15 @@
 """Doctor command for MCPM - System health check and diagnostics"""
 
+import importlib.metadata as metadata
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from rich.console import Console
 
@@ -15,6 +20,64 @@ from mcpm.utils.repository import RepositoryManager
 from mcpm.utils.rich_click_config import click
 
 console = Console()
+
+
+def _direct_url(dist: metadata.Distribution) -> dict:
+    return json.loads(dist.read_text("direct_url.json") or "{}")
+
+
+def _check_plugins() -> int:
+    """Report plugins that should be installed but are missing or come from elsewhere.
+
+    For an editable checkout the expected set is read from ``plugins/*/pyproject.toml``
+    rather than mcpm's own metadata, which goes stale when the venv is rebuilt from an
+    older checkout. Any plugin not installed editable from that tree is flagged, since
+    the plugin names are not reserved on PyPI.
+    """
+    source_root = None
+    try:
+        own = _direct_url(metadata.distribution("mcpm"))
+        if own.get("dir_info", {}).get("editable"):
+            source_root = Path(unquote(urlparse(own["url"]).path))
+    except metadata.PackageNotFoundError:
+        pass
+
+    expected: dict[str, Path | None] = {}
+    if source_root:
+        for pyproject in sorted((source_root / "plugins").glob("*/pyproject.toml")):
+            expected[tomllib.loads(pyproject.read_text())["project"]["name"]] = pyproject.parent
+    else:
+        for requirement in metadata.requires("mcpm") or []:
+            name = re.split(r"[\s;<>=!~\[(@]", requirement, maxsplit=1)[0]
+            if name.startswith("mcpm-"):
+                expected[name] = None
+
+    issues = 0
+    for name, plugin_dir in expected.items():
+        try:
+            dist = metadata.distribution(name)
+        except metadata.PackageNotFoundError:
+            console.print(f"  ❌ Plugin {name} is not installed")
+            issues += 1
+            continue
+        if plugin_dir:
+            origin = _direct_url(dist)
+            if origin.get("url", "").rstrip("/") != plugin_dir.as_uri() or not origin.get("dir_info", {}).get(
+                "editable"
+            ):
+                console.print(f"  ⚠️  Plugin {name} is not an editable install of {plugin_dir}")
+                issues += 1
+                continue
+        console.print(f"  ✅ Plugin {name} {dist.version}")
+
+    if source_root:
+        for plugin_dir in sorted((source_root / "plugins").iterdir()):
+            if plugin_dir.is_dir() and not (plugin_dir / "pyproject.toml").exists():
+                console.print(f"  ⚠️  {plugin_dir} is empty - run 'git submodule update --init --recursive'")
+                issues += 1
+        if issues:
+            console.print(f"  💡 Reinstall: uv tool install --force --editable {source_root}", soft_wrap=True)
+    return issues
 
 
 @click.command()
@@ -43,6 +106,7 @@ def doctor():
     except Exception as e:
         console.print(f"  ❌ MCPM installation error: {e}")
         issues_found += 1
+    issues_found += _check_plugins()
 
     # 2. Check Python environment
     console.print("[bold cyan]🐍 Python Environment[/]")

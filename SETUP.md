@@ -18,19 +18,11 @@ cd mcpm.sh
 git checkout main
 git submodule update --init --recursive
 
-# Install mcpm (editable — changes take effect immediately)
+# Install mcpm and every plugin in plugins/ (all editable — changes take effect immediately)
 uv tool install --force --editable .
 
-# Install plugins into mcpm's environment
-mcpmPython="$(uv tool dir)/mcpm/bin/python"
-uv pip install --python "$mcpmPython" -e plugins/mcpm-sync
-uv pip install --python "$mcpmPython" -e plugins/mcpm-mcp
-uv pip install --python "$mcpmPython" -e plugins/mcpm-context
-
-# Verify
-mcpm --version
-mcpm skills ls
-mcpm sync --help
+# Verify: every "Plugin" line must be ✅
+mcpm doctor
 mcpm mcp doctor
 ```
 
@@ -43,21 +35,19 @@ cd mcpm.sh
 git checkout main
 git submodule update --init --recursive
 
-# Install mcpm (editable)
+# Install mcpm and every plugin in plugins/ (all editable)
 uv tool install --force --editable .
 
-# Install plugins into mcpm's environment
-$mcpmPython = Join-Path (uv tool dir) "mcpm\Scripts\python.exe"
-uv pip install --python $mcpmPython -e plugins/mcpm-sync
-uv pip install --python $mcpmPython -e plugins/mcpm-mcp
-uv pip install --python $mcpmPython -e plugins/mcpm-context
-
-# Verify
-mcpm --version
-mcpm skills ls
-mcpm sync --help
+# Verify: every "Plugin" line must be ✅
+mcpm doctor
 mcpm mcp doctor
 ```
+
+### Adding a plugin
+
+Plugins are dependencies of mcpm itself: add the package to `dependencies` and
+to `[tool.uv.sources]` (as an editable path) in `pyproject.toml`, then reinstall.
+`mcpm doctor` flags any `plugins/` directory that isn't installed that way.
 
 ### Windows: "Access is denied" on `uv tool install`
 

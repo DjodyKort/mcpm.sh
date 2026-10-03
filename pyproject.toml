@@ -41,6 +41,11 @@ dependencies = [
     "starlette>=0.40.0",
     "uvicorn[standard]>=0.30.0",
     "httpx>=0.27.0",
+    "mcpm-compression",
+    "mcpm-context",
+    "mcpm-council",
+    "mcpm-mcp",
+    "mcpm-sync",
 ]
 
 [project.urls]
@@ -50,6 +55,13 @@ Issues = "https://github.com/pathintegral-institute/mcpm.sh/issues"
 
 [project.scripts]
 mcpm = "mcpm.cli:main"
+
+[tool.uv.sources]
+mcpm-compression = { path = "plugins/mcpm-compression", editable = true }
+mcpm-context = { path = "plugins/mcpm-context", editable = true }
+mcpm-council = { path = "plugins/mcpm-council", editable = true }
+mcpm-mcp = { path = "plugins/mcpm-mcp", editable = true }
+mcpm-sync = { path = "plugins/mcpm-sync", editable = true }
 
 [tool.hatch.version]
 path = "src/mcpm/version.py"

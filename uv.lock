@@ -1029,6 +1029,11 @@ dependencies = [
     { name = "inquirerpy" },
     { name = "jsonschema" },
     { name = "mcp" },
+    { name = "mcpm-compression" },
+    { name = "mcpm-context" },
+    { name = "mcpm-council" },
+    { name = "mcpm-mcp" },
+    { name = "mcpm-sync" },
     { name = "prompt-toolkit" },
     { name = "psutil" },
     { name = "pydantic" },
@@ -1064,6 +1069,11 @@ requires-dist = [
     { name = "inquirerpy", specifier = ">=0.3.4" },
     { name = "jsonschema", specifier = ">=4.24.0" },
     { name = "mcp", specifier = ">=2.2,<3" },
+    { name = "mcpm-compression", editable = "plugins/mcpm-compression" },
+    { name = "mcpm-context", editable = "plugins/mcpm-context" },
+    { name = "mcpm-council", editable = "plugins/mcpm-council" },
+    { name = "mcpm-mcp", editable = "plugins/mcpm-mcp" },
+    { name = "mcpm-sync", editable = "plugins/mcpm-sync" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pydantic", specifier = ">=2.12.0" },
@@ -1088,6 +1098,121 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.26.0" },
     { name = "ruff", specifier = ">=0.11.4" },
 ]
+
+[[package]]
+name = "mcpm-compression"
+version = "0.8.0"
+source = { editable = "plugins/mcpm-compression" }
+dependencies = [
+    { name = "click" },
+    { name = "pydantic" },
+    { name = "rich" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "rich", specifier = ">=13.0.0" },
+]
+
+[[package]]
+name = "mcpm-context"
+version = "0.1.0"
+source = { editable = "plugins/mcpm-context" }
+dependencies = [
+    { name = "click" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "rich" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.0.0" },
+]
+
+[[package]]
+name = "mcpm-council"
+version = "0.1.0"
+source = { editable = "plugins/mcpm-council" }
+dependencies = [
+    { name = "click" },
+    { name = "fastmcp" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "rich" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.3" },
+    { name = "fastmcp", specifier = ">=2.0.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "pydantic", specifier = ">=2.5.1" },
+    { name = "rich", specifier = ">=12.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "respx", specifier = ">=0.21.0" },
+]
+
+[[package]]
+name = "mcpm-mcp"
+version = "0.1.0"
+source = { editable = "plugins/mcpm-mcp" }
+dependencies = [
+    { name = "click" },
+    { name = "fastmcp" },
+    { name = "pydantic" },
+    { name = "rich" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.3" },
+    { name = "fastmcp", specifier = ">=2.0.0" },
+    { name = "pydantic", specifier = ">=2.5.1" },
+    { name = "rich", specifier = ">=12.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+]
+
+[[package]]
+name = "mcpm-sync"
+version = "0.2.0"
+source = { editable = "plugins/mcpm-sync" }
+dependencies = [
+    { name = "click" },
+    { name = "cryptography" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "rich-click" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.3" },
+    { name = "cryptography", specifier = ">=42.0.0" },
+    { name = "pydantic", specifier = ">=2.5.1" },
+    { name = "requests", specifier = ">=2.28.0" },
+    { name = "rich", specifier = ">=12.0.0" },
+    { name = "rich-click", specifier = ">=1.8.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
 name = "mdurl"

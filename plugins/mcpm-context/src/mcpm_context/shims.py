@@ -30,7 +30,7 @@ _HEADER = (
 # cache) + our context sync. The doctor's cf-wrapper hash tripwire guards this
 # copied contract; the upstream post-sync-hook proposal removes the need for it.
 _PRESYNC = """\
-_mcpm_context_presync() {
+mcpm_context_presync() {
     local now; now=$(date +%s)
     local interval="${CLAUDE_SYNC_INTERVAL:-14400}"
     local cf_dir="${HOME}/.local/share/cf-dev-tools"
@@ -50,19 +50,22 @@ _mcpm_context_presync() {
     local ctx_last=0
     [[ -f "$ctx_cache" ]] && ctx_last=$(cat "$ctx_cache" 2>/dev/null || echo 0)
     if (( cf_ran )) || (( now - ctx_last >= interval )); then
-        command mcpm context sync >/dev/null 2>&1
-        mkdir -p "$(dirname "$ctx_cache")" 2>/dev/null
-        echo "$now" > "$ctx_cache"
+        if command mcpm context sync >/dev/null 2>&1; then
+            mkdir -p "$(dirname "$ctx_cache")" 2>/dev/null
+            echo "$now" > "$ctx_cache"
+        else
+            print -u2 "mcpm: context sync failed, retrying next launch (run 'mcpm doctor')"
+        fi
     fi
 }
 
 # Default claude = codeforward mode (org CLAUDE.md + personal/client layers).
-claude() { _mcpm_context_presync; command claude "$@"; }
+claude() { mcpm_context_presync; command claude "$@"; }
 
 # hrclaude launches the claude BINARY via `mcpm compression run` (it never hits
 # shell functions), so give daily hrclaude use the same freshness path.
 if (( $+functions[hrclaude] )); then
-    hrclaude() { _mcpm_context_presync; command mcpm compression run -- "$@"; }
+    hrclaude() { mcpm_context_presync; command mcpm compression run -- "$@"; }
 fi
 """
 
@@ -71,7 +74,7 @@ def shim_snippet(profiles: Dict[str, ProfileSpec], wrap_default: bool = True) ->
     lines = [_HEADER]
     if wrap_default:
         lines.append(_PRESYNC)
-    presync = "_mcpm_context_presync; " if wrap_default else ""
+    presync = "mcpm_context_presync; " if wrap_default else ""
     for name in sorted(profiles):
         pdir = profiles_root() / name
         lines.append(f'claude-{name}() {{ {presync}CLAUDE_CONFIG_DIR="{pdir}" command claude "$@"; }}')

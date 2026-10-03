@@ -52,7 +52,7 @@ def test04_shims_follow_profiles_and_wrap_flag(claude_json, claude_settings):
     # No profiles but wrapper on (default) → wrapper-only shims stay.
     apply(ContextConfig(settings=SettingsPolicy(ensure_allow=["Bash(git status)"])))
     content = shims_path().read_text()
-    assert "_mcpm_context_presync" in content and "claude-" not in content.replace("claude-code", "")
+    assert "mcpm_context_presync" in content and "claude-" not in content.replace("claude-code", "")
     # Wrapper off + no profiles → shims removed.
     report = apply(ContextConfig(wrap_default_claude=False))
     assert any("removed shims" in a for a in report.actions)
